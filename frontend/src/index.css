@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #f8fafc;
+    color: #0f172a;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Custom modern scrollbar for wide Excel grids */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Sticky professional ERP table headers */
+.erp-table-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: #2b6cb0; /* Solid Royal Blue */
+  color: #ffffff;
+  letter-spacing: 0.05em;
+}
+
+.table-number {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Crisp Excel-grade Accounting Grid Border Styles */
+.grid-table {
+  border-collapse: collapse !important;
+  width: 100%;
+}
+
+.grid-table th {
+  border-right: 1px solid rgba(255, 255, 255, 0.35) !important;
+  border-bottom: 2px solid #1e3a8a !important;
+  border-top: 1px solid #1e40af !important;
+}
+
+.grid-table th:first-child {
+  border-left: 1px solid #1e40af !important;
+}
+
+.grid-table td {
+  border-right: 1px solid #cbd5e1 !important;
+  border-bottom: 1px solid #cbd5e1 !important;
+}
+
+.grid-table td:first-child {
+  border-left: 1px solid #cbd5e1 !important;
+}
+
+/* Clean, modern input styling without clutter */
+input, select, textarea {
+  transition: all 0.15s ease-in-out;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+/* Smooth tab switching fade */
+@keyframes tabFade {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.tab-fade {
+  animation: tabFade 0.22s ease-out both;
+}
+
+/* Tactile press feedback on buttons */
+button:active {
+  transform: scale(0.97);
+}
+
+/* Smoother table row hover */
+.grid-table tbody tr, table tbody tr {
+  transition: background-color 0.15s ease;
+}
+
+/* Softer card shadows */
+.shadow-soft {
+  box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.12), 0 2px 6px -3px rgba(15, 23, 42, 0.08);
+}
+
+/* ===== Global table cell polish — uniform, calm, Excel-grade ===== */
+table {
+  border-collapse: collapse;
+}
+
+/* Crisp per-cell borders so every data cell is clearly identified */
+table thead th {
+  border: 1px solid #1e40af;
+}
+
+table tbody td {
+  border: 1px solid #e2e8f0;
+}
+
+table td, table th {
+  line-height: 1.35;
+}
+
+/* Kill the random pastel row backgrounds — one clean white/slate zebra everywhere */
+table tbody tr {
+  background-color: #ffffff !important;
+  transition: background-color 0.12s ease;
+}
+table tbody tr:nth-child(even) {
+  background-color: #f8fafc !important;
+}
+table tbody tr:hover {
+  background-color: #eef2ff !important;
+}
+table tbody tr:hover td {
+  color: #0f172a;
+}
+
+/* Even cell rhythm for data tables */
+.grid-table td {
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+
+/* Header cells keep a steady rhythm too */
+.grid-table th {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+/* Tabular digits inside every numeric cell so columns never jitter */
+table span.table-number, td.table-number {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* Professional Portrait Print Styles */
+@media print {
+  @page {
+    size: portrait;
+    margin: 8mm;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  nav, .no-print, button, header {
+    display: none !important;
+  }
+  .print-page-break {
+    page-break-before: always !important;
+    break-before: page !important;
+  }
+}
