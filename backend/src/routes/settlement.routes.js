@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { query } from '../config/db.js';
 import { authenticate } from '../middleware/auth.middleware.js';
-import { calculateFloatInterest } from '../utils/calculations.js';
+import { calculateFloatInterest, calculateMultiPaymentInterest } from '../utils/calculations.js';
 
 const router = Router();
 
@@ -36,9 +36,10 @@ router.get('/summary', authenticate, async (req, res) => {
       const qtls = Number(t.qty_qtls) || 0;
       const salesAmt = Number(t.total_sales_amount) || 0;
       const receivedAmt = Number(t.total_received_amount) || 0;
+      const cdPct = t.purchase_cd_pct !== null && t.purchase_cd_pct !== undefined ? Number(t.purchase_cd_pct) : 2.0;
       const purchasePaid = t.purchase_payment_amount 
         ? Number(t.purchase_payment_amount) 
-        : Math.round(Number(t.purchase_amount || 0) * 0.98 * 100) / 100;
+        : Math.round(Number(t.purchase_amount || 0) * (1 - cdPct / 100) * 100) / 100;
       const apmcCost = Math.round(((salesAmt * Number(masters.apmc_pct || 0.6)) / 100) * 100) / 100;
       const itCost = Math.round(((salesAmt * Number(masters.it_tcs_pct || 0.39)) / 100) * 100) / 100;
       const egbCost = Math.round(qtls * Number(masters.egb_cost_per_qtl || 100) * 100) / 100;
@@ -55,7 +56,7 @@ router.get('/summary', authenticate, async (req, res) => {
       const costOfGoods = Math.round((purchasePaid + apmcCost + itCost + egbCost + egbTrptCost + actualBrokerage) * 100) / 100;
       const effectiveInflow = receivedAmt > 0 ? receivedAmt : salesAmt;
       const tradingProfit = Math.round((effectiveInflow - costOfGoods) * 100) / 100;
-      const delayInterest = Number(t.purchase_delay_interest || 0);
+      const delayInterest = Number(t.purchase_delay_interest || 0) + Number(t.interest_loss || 0);
       const earnedInterest = Number(t.interest_earned || 0);
       const netProfit = Math.round((tradingProfit - delayInterest + earnedInterest) * 100) / 100;
       const profitPerQtl = qtls > 0 ? Math.round((netProfit / qtls) * 100) / 100 : 0;
@@ -110,33 +111,37 @@ router.get('/truck/:id', authenticate, async (req, res) => {
       totalBagsSold += Number(s.bags || 0);
       totalQtlsSold += Number(s.qty_qtls || 0);
       totalBillAmount += Number(s.bill_amount || 0);
-      totalLorryDeduction += Number(s.lorry_amount || 0);
+      totalLorryDeduction += Math.max(0, Number(s.lorry_amount || 0) - Number(s.lorry_advance || 0));
       totalReceivedAmount += Number(s.received_amount || 0);
       totalDiscount += Number(s.discount_amount || 0);
       totalCutting += Number(s.cutting_amount || 0);
 
-      // Re-evaluate float interest based on truck's purchase_payment_date
-      if (s.received_amount && s.sale_received_date && truck.purchase_payment_date) {
-        const float = calculateFloatInterest({
-          receivedAmount: s.received_amount,
-          saleReceivedDate: s.sale_received_date,
-          purchasePaymentDate: truck.purchase_payment_date,
+      // Re-evaluate float interest based on truck's purchase_payment_date, or arrival date (unloading_date / date)
+      const purchaseBaseDate = truck.purchase_payment_date || truck.unloading_date || truck.date;
+      let billPayments = [];
+      if (s.payments) {
+        billPayments = typeof s.payments === 'string' ? JSON.parse(s.payments) : (Array.isArray(s.payments) ? s.payments : []);
+      } else if (s.received_amount && s.sale_received_date) {
+        billPayments = [{ amount: Number(s.received_amount), date: s.sale_received_date }];
+      }
+
+      if (billPayments.length > 0 && purchaseBaseDate) {
+        const multi = calculateMultiPaymentInterest({
+          payments: billPayments,
+          purchasePaymentDate: purchaseBaseDate,
           annualRatePct: annualRate,
         });
-
-        if (float.type === 'EARNED') {
-          totalInterestEarned += Math.abs(float.interest);
-        } else if (float.type === 'LOSS') {
-          totalInterestLoss += Math.abs(float.interest);
-        }
+        totalInterestEarned += multi.totalInterestEarned;
+        totalInterestLoss += multi.totalInterestLoss;
       }
     });
 
     // Cost Of Goods Calculation for this truck:
-    // Purchase amount (-2% CD) + APMC (0.6%) + IT (0.39%) + EGB (100) + EGB Trpt (20) + Delhi Brk (60) + Kasat Brk (40)
+    // Purchase amount (-CD%) + APMC (0.6%) + IT (0.39%) + EGB (100) + EGB Trpt (20) + Delhi Brk (60) + Kasat Brk (40)
+    const cdPct = truck.purchase_cd_pct !== null && truck.purchase_cd_pct !== undefined ? Number(truck.purchase_cd_pct) : 2.0;
     const purchasePaid = truck.purchase_payment_amount
       ? Number(truck.purchase_payment_amount)
-      : Math.round(Number(truck.purchase_amount) * 0.98 * 100) / 100;
+      : Math.round(Number(truck.purchase_amount) * (1 - cdPct / 100) * 100) / 100;
 
     const apmcCost = Math.round(((totalBillAmount * Number(masters.apmc_pct || 0.6)) / 100) * 100) / 100;
     const itCost = Math.round(((totalBillAmount * Number(masters.it_tcs_pct || 0.39)) / 100) * 100) / 100;
@@ -174,7 +179,7 @@ router.get('/truck/:id', authenticate, async (req, res) => {
       }
     }
 
-    const netInterestAccrued = Math.round((totalInterestEarned - purchaseDelayInterest) * 100) / 100;
+    const netInterestAccrued = Math.round((totalInterestEarned - totalInterestLoss - purchaseDelayInterest) * 100) / 100;
 
     // Net Realized Profit = (Total Received from buyers - Cost of Goods) + Net Interest Accrued
     const tradingProfit = Math.round((totalReceivedAmount - costOfGoods) * 100) / 100;
@@ -225,6 +230,7 @@ router.put('/truck/:id/payment', authenticate, async (req, res) => {
       purchase_payment_date,
       purchase_payment_mode,
       purchase_payment_ref,
+      purchase_cd_pct,
       sale_amount_received_date,
       status,
     } = req.body;
@@ -260,8 +266,9 @@ router.put('/truck/:id/payment', authenticate, async (req, res) => {
         sale_amount_received_date = $5,
         purchase_gap_days = $6,
         purchase_delay_interest = $7,
-        status = COALESCE($8, status)
-       WHERE id = $9
+        status = COALESCE($8, status),
+        purchase_cd_pct = COALESCE($9, purchase_cd_pct)
+       WHERE id = $10
        RETURNING *`,
       [
         purchase_payment_amount,
@@ -272,6 +279,7 @@ router.put('/truck/:id/payment', authenticate, async (req, res) => {
         gapDays,
         delayInterest,
         status,
+        purchase_cd_pct !== undefined && purchase_cd_pct !== '' && purchase_cd_pct !== null ? Number(purchase_cd_pct) : null,
         id,
       ]
     );

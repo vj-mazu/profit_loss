@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { query } from '../config/db.js';
 import { authenticate } from '../middleware/auth.middleware.js';
-import { calculateBillFinancials, calculateFloatInterest } from '../utils/calculations.js';
+import { calculateBillFinancials, calculateFloatInterest, calculateMultiPaymentInterest } from '../utils/calculations.js';
 
 const router = Router();
 
@@ -99,6 +99,8 @@ router.post('/', authenticate, async (req, res) => {
       qty_qtls,
       actual_rate,
       billing_rate,
+      lf_rate,
+      lorry_advance,
       brokerage_per_qtl,
       received_amount,
       disc_pct,
@@ -109,6 +111,7 @@ router.post('/', authenticate, async (req, res) => {
       payment_ref,
       payment_status,
       brand_breakdown,
+      payments,
     } = req.body;
 
     const truckRes = await query('SELECT * FROM trucks WHERE id = $1', [truck_id]);
@@ -180,22 +183,48 @@ router.post('/', authenticate, async (req, res) => {
     const masters = masterRes.rows.length > 0 ? masterRes.rows[0].value : {};
 
     const calculatedQty = qty_qtls ? Number(qty_qtls) : Math.round((Number(bags) * 30 / 100) * 100) / 100;
+    const effectiveLfRate = lf_rate !== undefined && lf_rate !== null && lf_rate !== '' ? Number(lf_rate) : Number(truck.truck_lf || 0);
+    const effectiveLorryAdvance = lorry_advance !== undefined && lorry_advance !== null && lorry_advance !== '' ? Number(lorry_advance) : 0;
 
     const financials = calculateBillFinancials({
       billingRate: billing_rate,
       actualRate: actual_rate,
       qtyQtls: calculatedQty,
       truckLfRate: truck.truck_lf,
+      lfRate: effectiveLfRate,
+      lorryAdvance: effectiveLorryAdvance,
       purchaseRate: truck.rate_per_qtl,
       masters,
     });
 
-    const interestFloat = calculateFloatInterest({
-      receivedAmount: received_amount,
-      saleReceivedDate: sale_received_date,
-      purchasePaymentDate: truck.purchase_payment_date,
+    const purchaseBaseDate = truck.purchase_payment_date || truck.unloading_date || truck.date;
+
+    // Multi-payment tranche parsing and exact interest tracking
+    let paymentList = [];
+    if (payments) {
+      paymentList = typeof payments === 'string' ? JSON.parse(payments) : (Array.isArray(payments) ? payments : []);
+    } else if (received_amount && Number(received_amount) > 0) {
+      paymentList = [{
+        amount: Number(received_amount),
+        date: sale_received_date || null,
+        mode: payment_mode || 'RTGS/NEFT',
+        ref: payment_ref || null,
+      }];
+    }
+
+    const multiInterest = calculateMultiPaymentInterest({
+      payments: paymentList,
+      purchasePaymentDate: purchaseBaseDate,
       annualRatePct: masters.annual_interest_rate || 12.0,
     });
+
+    const totalReceivedVal = multiInterest.totalReceived > 0 ? multiInterest.totalReceived : (received_amount ? Number(received_amount) : null);
+    const latestDate = paymentList.length > 0 ? paymentList[paymentList.length - 1].date : (sale_received_date || null);
+    const latestMode = paymentList.length > 0 ? paymentList[paymentList.length - 1].mode : (payment_mode || null);
+    const latestRef = paymentList.length > 0 ? paymentList[paymentList.length - 1].ref : (payment_ref || null);
+    const totalInterestAmt = multiInterest.totalInterestLoss > 0 ? multiInterest.totalInterestLoss : multiInterest.totalInterestEarned;
+    const interestTypeVal = multiInterest.interestType;
+    const interestDaysVal = paymentList.length > 0 ? (multiInterest.enrichedPayments[multiInterest.enrichedPayments.length - 1].interest_days || 0) : 0;
 
     // Custom per-party negotiated brokerage:
     const finalBrokerageRate = brokerage_per_qtl !== undefined && brokerage_per_qtl !== null && brokerage_per_qtl !== ''
@@ -205,24 +234,34 @@ router.post('/', authenticate, async (req, res) => {
       ? Math.round(finalBrokerageRate * calculatedQty * 100) / 100
       : null;
 
-    // Auto-derive discount & cutting like the Excel Sheet3 settlement formulas:
-    //   Discount = (Bill Amount + Lorry Amount) x Disc%
-    //   Actual Amt = (Actual Rate - LF) x Qty
-    //   Cutting = Actual Amt - Received - Discount
+    // Auto-derive discount & cutting:
     const effectiveDiscPct = disc_pct !== undefined && disc_pct !== null && disc_pct !== '' ? Number(disc_pct) : 0.05;
-    const grossPayable = financials.billAmount + financials.lorryAmount;
+    const grossPayable = financials.grossBillAmount;
     const effectiveDiscount =
       discount_amount !== undefined && discount_amount !== null && discount_amount !== ''
         ? Number(discount_amount)
         : Math.round(grossPayable * effectiveDiscPct * 100) / 100;
-    const actualAmt = Math.round((Number(actual_rate || 0) - Number(truck.truck_lf || 0)) * calculatedQty * 100) / 100;
-    const hasReceived = received_amount !== undefined && received_amount !== null && received_amount !== '';
+    const actualAmt = Math.round(((Number(actual_rate || 0) * calculatedQty) - financials.lorryBalance) * 100) / 100;
+    const hasReceived = totalReceivedVal !== null && totalReceivedVal !== undefined;
     const effectiveCutting =
       cutting_amount !== undefined && cutting_amount !== null && cutting_amount !== ''
         ? Number(cutting_amount)
         : hasReceived
-          ? Math.round((actualAmt - Number(received_amount) - effectiveDiscount) * 100) / 100
+          ? Math.round((actualAmt - Number(totalReceivedVal) - effectiveDiscount) * 100) / 100
           : 0;
+
+    let finalPaymentStatus = payment_status;
+    if (!finalPaymentStatus || finalPaymentStatus === 'PENDING PAYMENT') {
+      if (totalReceivedVal && totalReceivedVal > 0) {
+        if (totalReceivedVal + effectiveDiscount + effectiveCutting >= financials.billAmount - 5) {
+          finalPaymentStatus = effectiveCutting !== 0 ? 'CUTTING' : 'PAID';
+        } else {
+          finalPaymentStatus = 'PARTIAL PAYMENT';
+        }
+      } else {
+        finalPaymentStatus = 'PENDING PAYMENT';
+      }
+    }
 
     const formattedBrandBreakdown = brand_breakdown && typeof brand_breakdown === 'object'
       ? JSON.stringify(brand_breakdown)
@@ -235,8 +274,9 @@ router.post('/', authenticate, async (req, res) => {
         egb_rate, egb_trpt_rate, delhi_brk_rate, kasat_brk_rate, cd_rate, breakeven_rate,
         received_amount, disc_pct, discount_amount, cutting_amount, sale_received_date,
         interest_days, interest_amount, interest_type, payment_status,
-        brokerage_per_qtl, brokerage_amount, payment_mode, payment_ref, brand_breakdown
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+        brokerage_per_qtl, brokerage_amount, payment_mode, payment_ref, brand_breakdown,
+        lorry_advance, payments
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
       RETURNING *`,
       [
         truck_id,
@@ -249,7 +289,7 @@ router.post('/', authenticate, async (req, res) => {
         financials.billAmount,
         financials.lorryAmount,
         truck.rate_per_qtl,
-        truck.truck_lf,
+        financials.effectiveLfRate,
         financials.apmcRate,
         financials.itRate,
         financials.egbRate,
@@ -258,20 +298,22 @@ router.post('/', authenticate, async (req, res) => {
         financials.kasatBrkRate,
         financials.cdRate,
         financials.breakevenRate,
-        received_amount ? Number(received_amount) : null,
+        totalReceivedVal,
         effectiveDiscPct,
         effectiveDiscount,
         effectiveCutting,
-        sale_received_date || null,
-        interestFloat.days,
-        interestFloat.interest,
-        interestFloat.type,
-        payment_status || (received_amount ? 'PAID' : 'PENDING PAYMENT'),
+        latestDate,
+        interestDaysVal,
+        totalInterestAmt,
+        interestTypeVal,
+        finalPaymentStatus,
         finalBrokerageRate,
         finalBrokerageAmount,
-        payment_mode || null,
-        payment_ref || null,
+        latestMode,
+        latestRef,
         formattedBrandBreakdown,
+        effectiveLorryAdvance,
+        JSON.stringify(multiInterest.enrichedPayments),
       ]
     );
 
@@ -293,6 +335,8 @@ router.put('/:id', authenticate, async (req, res) => {
       qty_qtls,
       actual_rate,
       billing_rate,
+      lf_rate,
+      lorry_advance,
       brokerage_per_qtl,
       received_amount,
       disc_pct,
@@ -303,6 +347,7 @@ router.put('/:id', authenticate, async (req, res) => {
       payment_ref,
       payment_status,
       brand_breakdown,
+      payments,
     } = req.body;
 
     const curBillRes = await query('SELECT * FROM sales_bills WHERE id = $1', [id]);
@@ -379,23 +424,67 @@ router.put('/:id', authenticate, async (req, res) => {
     const masterRes = await query("SELECT value FROM masters WHERE key = 'system_settings'");
     const masters = masterRes.rows.length > 0 ? masterRes.rows[0].value : {};
 
-    const calculatedQty = qty_qtls ? Number(qty_qtls) : Math.round((Number(bags) * 30 / 100) * 100) / 100;
+    const calculatedQty = qty_qtls ? Number(qty_qtls) : Math.round((Number(bags !== undefined ? bags : curBill.bags) * 30 / 100) * 100) / 100;
+    const effectiveLfRate = lf_rate !== undefined
+      ? (lf_rate !== null && lf_rate !== '' ? Number(lf_rate) : Number(truck.truck_lf || 0))
+      : (curBill.lf_rate !== null && curBill.lf_rate !== undefined ? Number(curBill.lf_rate) : Number(truck.truck_lf || 0));
+    const effectiveLorryAdvance = lorry_advance !== undefined
+      ? (lorry_advance !== null && lorry_advance !== '' ? Number(lorry_advance) : 0)
+      : (curBill.lorry_advance !== null && curBill.lorry_advance !== undefined ? Number(curBill.lorry_advance) : 0);
 
     const financials = calculateBillFinancials({
       billingRate: billing_rate || curBill.billing_rate,
       actualRate: actual_rate || curBill.actual_rate,
       qtyQtls: calculatedQty,
       truckLfRate: truck.truck_lf,
+      lfRate: effectiveLfRate,
+      lorryAdvance: effectiveLorryAdvance,
       purchaseRate: truck.rate_per_qtl,
       masters,
     });
 
-    const interestFloat = calculateFloatInterest({
-      receivedAmount: received_amount !== undefined ? received_amount : curBill.received_amount,
-      saleReceivedDate: sale_received_date !== undefined ? sale_received_date : curBill.sale_received_date,
-      purchasePaymentDate: truck.purchase_payment_date,
+    const purchaseBaseDate = truck.purchase_payment_date || truck.unloading_date || truck.date;
+
+    // Multi-payment tranche parsing and exact interest tracking
+    let paymentList = [];
+    if (payments !== undefined) {
+      paymentList = typeof payments === 'string' ? JSON.parse(payments) : (Array.isArray(payments) ? payments : []);
+    } else if (curBill.payments) {
+      paymentList = typeof curBill.payments === 'string' ? JSON.parse(curBill.payments) : (Array.isArray(curBill.payments) ? curBill.payments : []);
+    } else if (received_amount !== undefined && Number(received_amount) > 0) {
+      paymentList = [{
+        amount: Number(received_amount),
+        date: sale_received_date || curBill.sale_received_date || null,
+        mode: payment_mode || curBill.payment_mode || 'RTGS/NEFT',
+        ref: payment_ref || curBill.payment_ref || null,
+      }];
+    }
+
+    const multiInterest = calculateMultiPaymentInterest({
+      payments: paymentList,
+      purchasePaymentDate: purchaseBaseDate,
       annualRatePct: masters.annual_interest_rate || 12.0,
     });
+
+    const totalReceivedVal = multiInterest.totalReceived > 0 
+      ? multiInterest.totalReceived 
+      : (received_amount !== undefined ? (received_amount !== '' && received_amount !== null ? Number(received_amount) : null) : curBill.received_amount);
+
+    const latestDate = paymentList.length > 0 
+      ? paymentList[paymentList.length - 1].date 
+      : (sale_received_date !== undefined ? sale_received_date : curBill.sale_received_date);
+
+    const latestMode = paymentList.length > 0 
+      ? paymentList[paymentList.length - 1].mode 
+      : (payment_mode !== undefined ? payment_mode : curBill.payment_mode);
+
+    const latestRef = paymentList.length > 0 
+      ? paymentList[paymentList.length - 1].ref 
+      : (payment_ref !== undefined ? payment_ref : curBill.payment_ref);
+
+    const totalInterestAmt = Math.abs(multiInterest.netInterest);
+    const interestTypeVal = multiInterest.interestType;
+    const interestDaysVal = paymentList.length > 0 ? (multiInterest.enrichedPayments[multiInterest.enrichedPayments.length - 1].interest_days || 0) : 0;
 
     // Custom per-party negotiated brokerage:
     const finalBrokerageRate = brokerage_per_qtl !== undefined
@@ -405,22 +494,34 @@ router.put('/:id', authenticate, async (req, res) => {
       ? Math.round(Number(finalBrokerageRate) * calculatedQty * 100) / 100
       : null;
 
-    // Auto-derive discount & cutting exactly like POST (Excel Sheet3 formulas).
+    // Auto-derive discount & cutting:
     const effectiveDiscPct = disc_pct !== undefined && disc_pct !== null && disc_pct !== '' ? Number(disc_pct) : (curBill.disc_pct ?? 0.05);
-    const grossPayable = financials.billAmount + financials.lorryAmount;
+    const grossPayable = financials.grossBillAmount;
     const effectiveDiscount =
       discount_amount !== undefined && discount_amount !== null && discount_amount !== ''
         ? Number(discount_amount)
         : Math.round(grossPayable * effectiveDiscPct * 100) / 100;
-    const actualAmt = Math.round(((Number(actual_rate || curBill.actual_rate)) - Number(truck.truck_lf || 0)) * calculatedQty * 100) / 100;
-    const effectiveReceived = received_amount !== undefined ? received_amount : curBill.received_amount;
-    const hasReceived = effectiveReceived !== null && effectiveReceived !== undefined && effectiveReceived !== '';
+    const actualAmt = Math.round(((Number(actual_rate || curBill.actual_rate) * calculatedQty) - financials.lorryBalance) * 100) / 100;
+    const hasReceived = totalReceivedVal !== null && totalReceivedVal !== undefined && totalReceivedVal !== '';
     const effectiveCutting =
       cutting_amount !== undefined && cutting_amount !== null && cutting_amount !== ''
         ? Number(cutting_amount)
         : hasReceived
-          ? Math.round((actualAmt - Number(effectiveReceived) - effectiveDiscount) * 100) / 100
+          ? Math.round((actualAmt - Number(totalReceivedVal) - effectiveDiscount) * 100) / 100
           : 0;
+
+    let finalPaymentStatus = payment_status;
+    if (!finalPaymentStatus || finalPaymentStatus === 'PENDING PAYMENT') {
+      if (totalReceivedVal && Number(totalReceivedVal) > 0) {
+        if (Number(totalReceivedVal) + effectiveDiscount + effectiveCutting >= financials.billAmount - 5) {
+          finalPaymentStatus = effectiveCutting !== 0 ? 'CUTTING' : 'PAID';
+        } else {
+          finalPaymentStatus = 'PARTIAL PAYMENT';
+        }
+      } else {
+        finalPaymentStatus = 'PENDING PAYMENT';
+      }
+    }
 
     const formattedBrandBreakdown = brand_breakdown !== undefined
       ? (brand_breakdown && typeof brand_breakdown === 'object' ? JSON.stringify(brand_breakdown) : brand_breakdown)
@@ -452,8 +553,11 @@ router.put('/:id', authenticate, async (req, res) => {
         brokerage_amount = $22,
         payment_mode = $23,
         payment_ref = $24,
-        brand_breakdown = $25
-       WHERE id = $26
+        brand_breakdown = $25,
+        lf_rate = COALESCE($26, lf_rate),
+        lorry_advance = COALESCE($27, lorry_advance),
+        payments = $28
+       WHERE id = $29
        RETURNING *`,
       [
         sale_bill_no,
@@ -467,20 +571,23 @@ router.put('/:id', authenticate, async (req, res) => {
         financials.apmcRate,
         financials.itRate,
         financials.breakevenRate,
-        received_amount,
+        totalReceivedVal,
         effectiveDiscPct,
         effectiveDiscount,
         effectiveCutting,
-        sale_received_date,
-        interestFloat.days,
-        interestFloat.interest,
-        interestFloat.type,
-        payment_status,
+        latestDate,
+        interestDaysVal,
+        totalInterestAmt,
+        interestTypeVal,
+        finalPaymentStatus,
         finalBrokerageRate,
         finalBrokerageAmount,
-        payment_mode !== undefined ? payment_mode : curBill.payment_mode,
-        payment_ref !== undefined ? payment_ref : curBill.payment_ref,
+        latestMode,
+        latestRef,
         formattedBrandBreakdown,
+        financials.effectiveLfRate,
+        effectiveLorryAdvance,
+        JSON.stringify(multiInterest.enrichedPayments),
         id,
       ]
     );

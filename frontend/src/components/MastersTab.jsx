@@ -3,8 +3,10 @@ import { Settings, Users, MapPin, Building2, Plus, Save, Trash2, KeyRound, Packa
 import api from '../services/api';
 import Modal from './Modal';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 
 export default function MastersTab() {
+  const toast = useToast();
   const { isAdmin, user: currentUser } = useAuth();
   const [subTab, setSubTab] = useState('settings'); // 'settings', 'colors', 'users', 'locations', 'parties'
   const [loading, setLoading] = useState(true);
@@ -86,9 +88,9 @@ export default function MastersTab() {
     e.preventDefault();
     try {
       await api.updateMasterSettings(settings);
-      alert('System settings & interest rates saved successfully');
+      toast.success('System settings & interest rates saved successfully');
     } catch (err) {
-      alert('Failed to save settings');
+      toast.error('Failed to save settings');
     }
   };
 
@@ -100,9 +102,9 @@ export default function MastersTab() {
       setUserFormData({ username: '', password: '', full_name: '', role: 'manager' });
       const usersRes = await api.getUsers();
       setUsers(usersRes.data);
-      alert('New user created successfully');
+      toast.success('New user created successfully');
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to create user');
+      toast.error(err.response?.data?.message || 'Failed to create user');
     }
   };
 
@@ -112,8 +114,9 @@ export default function MastersTab() {
         await api.deleteUser(id);
         const usersRes = await api.getUsers();
         setUsers(usersRes.data);
+        toast.success('User account deleted successfully');
       } catch (err) {
-        alert(err.response?.data?.message || 'Failed to delete user');
+        toast.error(err.response?.data?.message || 'Failed to delete user');
       }
     }
   };
@@ -134,8 +137,9 @@ export default function MastersTab() {
       setLocations(updated);
       setNewLocName('');
       setNewLocPrefix('');
+      toast.success('Location added successfully');
     } catch (err) {
-      alert('Failed to update locations');
+      toast.error('Failed to update locations');
     }
   };
 
@@ -157,8 +161,9 @@ export default function MastersTab() {
       setNewPartyName('');
       setNewPartyCity('');
       setNewPartyBrokerage('');
+      toast.success('Party added successfully');
     } catch (err) {
-      alert('Failed to update parties directory');
+      toast.error('Failed to update parties directory');
     }
   };
 
@@ -168,8 +173,9 @@ export default function MastersTab() {
       try {
         await api.updateParties(updated);
         setParties(updated);
+        toast.success('Party removed successfully');
       } catch (err) {
-        alert('Failed to delete party');
+        toast.error('Failed to delete party');
       }
     }
   };
@@ -179,7 +185,7 @@ export default function MastersTab() {
     const name = newColorName.trim();
     const id = name.toLowerCase().replace(/[^a-z0-9]/g, '_');
     if (bagColors.some(c => c.name.toLowerCase() === name.toLowerCase())) {
-      alert('This bag color already exists!');
+      toast.warning('This bag color already exists!');
       return;
     }
     const updated = [
@@ -190,8 +196,9 @@ export default function MastersTab() {
       await api.updateBagColors(updated);
       setBagColors(updated);
       setNewColorName('');
+      toast.success('Bag color added successfully');
     } catch (err) {
-      alert('Failed to save bag color');
+      toast.error('Failed to save bag color');
     }
   };
 
@@ -201,8 +208,9 @@ export default function MastersTab() {
       try {
         await api.updateBagColors(updated);
         setBagColors(updated);
+        toast.success('Bag color removed successfully');
       } catch (err) {
-        alert('Failed to delete bag color');
+        toast.error('Failed to delete bag color');
       }
     }
   };

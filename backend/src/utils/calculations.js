@@ -42,6 +42,8 @@ export function calculateBillFinancials({
   actualRate = 0,
   qtyQtls = 0,
   truckLfRate = 0,
+  lfRate = null,
+  lorryAdvance = 0,
   purchaseRate = 0,
   masters = {},
 }) {
@@ -60,9 +62,12 @@ export function calculateBillFinancials({
   // Dynamic CD: 5% of the actual rate (not a flat rupee default)
   const cdRate = Math.round(((Number(actualRate) * cdPct) / 100) * 100) / 100;
 
+  const effectiveLfRate = lfRate !== null && lfRate !== undefined && lfRate !== '' ? Number(lfRate) : Number(truckLfRate || 0);
+  const effectiveAdvance = Number(lorryAdvance || 0);
+
   const breakevenRate = calculateBreakevenRate({
     purchaseRate,
-    lfRate: truckLfRate,
+    lfRate: effectiveLfRate,
     apmcPct,
     billingRate,
     actualRate,
@@ -75,14 +80,20 @@ export function calculateBillFinancials({
     purchaseDiscountPct,
   });
 
-  const netRate = Number(billingRate) - Number(truckLfRate);
-  const billAmount = Math.round(netRate * Number(qtyQtls) * 100) / 100;
-  const lorryAmount = Math.round(Number(truckLfRate) * Number(qtyQtls) * 100) / 100;
+  const totalLorryAmount = Math.round(Number(effectiveLfRate) * Number(qtyQtls) * 100) / 100;
+  const lorryBalance = Math.max(0, Math.round((totalLorryAmount - effectiveAdvance) * 100) / 100);
   const grossBillAmount = Math.round(Number(billingRate) * Number(qtyQtls) * 100) / 100;
+  // Net Bill Amount payable by buyer to seller:
+  // Buyer pays driver only the balance LF upon arrival.
+  // Therefore, buyer deducts ONLY lorry balance (if seller paid advance, buyer pays that advance extra to seller!)
+  const billAmount = Math.round((grossBillAmount - lorryBalance) * 100) / 100;
 
   return {
     billAmount,
-    lorryAmount,
+    lorryAmount: totalLorryAmount,
+    lorryAdvance: effectiveAdvance,
+    lorryBalance,
+    effectiveLfRate,
     grossBillAmount,
     apmcRate,
     itRate,
@@ -119,5 +130,74 @@ export function calculateFloatInterest({
     days,
     interest,
     type: days < 0 ? 'EARNED' : days > 0 ? 'LOSS' : 'NEUTRAL',
+  };
+}
+
+export function calculateMultiPaymentInterest({
+  payments = [],
+  purchasePaymentDate,
+  annualRatePct = 12.0,
+}) {
+  if (!Array.isArray(payments) || payments.length === 0) {
+    return {
+      totalReceived: 0,
+      totalInterestEarned: 0,
+      totalInterestLoss: 0,
+      netInterest: 0,
+      interestType: 'NONE',
+      enrichedPayments: [],
+    };
+  }
+
+  let totalReceived = 0;
+  let totalInterestEarned = 0;
+  let totalInterestLoss = 0;
+
+  const enrichedPayments = payments.map((p) => {
+    const amt = Number(p.amount || 0);
+    totalReceived += amt;
+
+    if (!p.date || !purchasePaymentDate || amt <= 0) {
+      return {
+        ...p,
+        amount: amt,
+        interest_days: 0,
+        interest_amount: 0,
+        interest_type: 'NONE',
+      };
+    }
+
+    const float = calculateFloatInterest({
+      receivedAmount: amt,
+      saleReceivedDate: p.date,
+      purchasePaymentDate,
+      annualRatePct,
+    });
+
+    if (float.type === 'EARNED') {
+      totalInterestEarned += Math.abs(float.interest);
+    } else if (float.type === 'LOSS') {
+      totalInterestLoss += Math.abs(float.interest);
+    }
+
+    return {
+      ...p,
+      amount: amt,
+      interest_days: float.days,
+      interest_amount: Math.abs(float.interest),
+      interest_type: float.type,
+    };
+  });
+
+  const netInterest = Math.round((totalInterestEarned - totalInterestLoss) * 100) / 100;
+  const interestType = netInterest > 0 ? 'EARNED' : netInterest < 0 ? 'LOSS' : 'NONE';
+
+  return {
+    totalReceived: Math.round(totalReceived * 100) / 100,
+    totalInterestEarned: Math.round(totalInterestEarned * 100) / 100,
+    totalInterestLoss: Math.round(totalInterestLoss * 100) / 100,
+    netInterest,
+    interestType,
+    enrichedPayments,
   };
 }

@@ -41,7 +41,8 @@ export function exportFleetPdf(trucks = [], title = 'Consolidated Fleet Profit &
   const tableBody = trucks.map((t) => {
     const b = Number(t.bags || 0);
     const q = Number(t.qty_qtls || 0);
-    const mOut = Number(t.purchase_payment_amount || Number(t.purchase_amount || 0) * 0.98);
+    const cdPct = t.purchase_cd_pct !== null && t.purchase_cd_pct !== undefined ? Number(t.purchase_cd_pct) : 2.0;
+    const mOut = Number(t.purchase_payment_amount || Number(t.purchase_amount || 0) * (1 - cdPct / 100));
     const cogs = Number(t.cost_of_goods || 0);
     const inflow = Number(t.effective_inflow || 0);
     const np = Number(t.net_profit || 0);
@@ -263,7 +264,7 @@ export function exportSalesPdf(sales = [], title = 'Wholesale Sales Realization 
     Number(s.qty_qtls || 0).toFixed(1),
     `Rs. ${Number(s.billing_rate || 0).toLocaleString('en-IN')}`,
     formatINR(s.bill_amount),
-    formatINR(s.lorry_amount || 0),
+    formatINR(Math.max(0, Number(s.lorry_amount || 0) - Number(s.lorry_advance || 0))) + (Number(s.lorry_advance) > 0 ? ` (Adv: ${formatINR(s.lorry_advance)})` : ''),
     formatINR(s.discount_amount || 0),
     formatINR(s.cutting_amount || 0),
     formatINR(s.received_amount || s.bill_amount),
@@ -362,20 +363,20 @@ export function exportTruckSettlementReceiptPdf({ truck, sales = [], metrics = {
 
   let currentY = doc.lastAutoTable.finalY + 12;
 
-  // SECTION 1: RICE COMMODITY PURCHASE (MILL INWARD OUTFLOW)
+  const cdPct = truck?.purchase_cd_pct !== null && truck?.purchase_cd_pct !== undefined ? Number(truck.purchase_cd_pct) : 2.0;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(30, 41, 59);
-  doc.text('1. RICE COMMODITY PURCHASE (MILL INFLOW & -2% CD CALCULATION)', marginX, currentY);
+  doc.text(`1. RICE COMMODITY PURCHASE (MILL INFLOW & -${cdPct}% CD CALCULATION)`, marginX, currentY);
 
   const purchaseGross = Number(truck?.purchase_amount || 0);
-  const cdBenefit = purchaseGross * 0.02;
-  const netPaidMill = Number(metrics?.purchasePaid || (purchaseGross * 0.98));
+  const cdBenefit = purchaseGross * (cdPct / 100);
+  const netPaidMill = Number(metrics?.purchasePaid || (purchaseGross - cdBenefit));
 
   autoTable(doc, {
     startY: currentY + 5,
     theme: 'grid',
-    head: [['Particulars / Description', 'Packing', 'Quantity (Q)', 'Purchase Rate', 'Gross Mill Value', '2% Cash Discount (CD)', 'Net Paid to Mill']],
+    head: [['Particulars / Description', 'Packing', 'Quantity (Q)', 'Purchase Rate', 'Gross Mill Value', `${cdPct}% Cash Discount (CD)`, 'Net Paid to Mill']],
     body: [
       [
         `Rice Procurement\nBill: ${truck?.purchase_bill_no || 'Direct'}`,
@@ -546,7 +547,7 @@ export function exportTruckSettlementReceiptPdf({ truck, sales = [], metrics = {
     Number(s.bags || 0).toLocaleString('en-IN'),
     Number(s.qty_qtls || 0).toFixed(1),
     `Rs. ${Number(s.billing_rate).toLocaleString('en-IN')}`,
-    formatINR(s.lorry_amount || 0),
+    formatINR(Math.max(0, Number(s.lorry_amount || 0) - Number(s.lorry_advance || 0))) + (Number(s.lorry_advance) > 0 ? ` (Adv: ${formatINR(s.lorry_advance)})` : ''),
     formatINR(s.bill_amount),
     formatINR(s.received_amount || s.bill_amount),
     formatINR(s.discount_amount || 0),

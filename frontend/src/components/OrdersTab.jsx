@@ -18,8 +18,10 @@ import api from '../services/api';
 import Modal from './Modal';
 import FilterBar from './FilterBar';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 
 export default function OrdersTab() {
+  const toast = useToast();
   const { isAdmin } = useAuth();
   const [orders, setOrders] = useState([]);
   const [egbStock, setEgbStock] = useState([]);
@@ -100,7 +102,7 @@ export default function OrdersTab() {
     if (!newColorName.trim()) return;
     const clean = newColorName.trim();
     if (bagColors.some((c) => c.name.toLowerCase() === clean.toLowerCase())) {
-      alert(`Color "${clean}" is already added.`);
+      toast.warning(`Color "${clean}" is already added.`);
       return;
     }
     const newEntry = {
@@ -299,9 +301,10 @@ export default function OrdersTab() {
       if (payload.total_bags === null) payload.total_bags = (Number(payload.blue_bags) || 0) + (Number(payload.orange_bags) || 0) + (Number(payload.green_bags) || 0);
       await api.updateEgbStock(adjustEgb.id, payload);
       setAdjustEgb(null);
+      toast.success('EGB stock updated successfully');
       loadData();
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to update EGB stock');
+      toast.error(err.response?.data?.message || 'Failed to update EGB stock');
     }
   };
 
@@ -337,13 +340,15 @@ export default function OrdersTab() {
 
       if (editingOrderId) {
         await api.updateOrder(editingOrderId, payload);
+        toast.success(`Purchase contract ${editingOrderId} updated successfully`);
       } else {
         await api.createOrder(payload);
+        toast.success('Purchase contract created successfully');
       }
       setIsModalOpen(false);
       loadData();
     } catch (err) {
-      alert(err.response?.data?.message || (editingOrderId ? 'Failed to update purchase order' : 'Failed to create purchase order'));
+      toast.error(err.response?.data?.message || (editingOrderId ? 'Failed to update purchase order' : 'Failed to create purchase order'));
     }
   };
 
@@ -351,9 +356,10 @@ export default function OrdersTab() {
     if (window.confirm(`Are you sure you want to delete purchase contract ${order.contract_no}?`)) {
       try {
         await api.deleteOrder(order.id);
+        toast.success(`Purchase contract ${order.contract_no} deleted successfully`);
         loadData();
       } catch (err) {
-        alert(err.response?.data?.message || 'Failed to delete purchase order');
+        toast.error(err.response?.data?.message || 'Failed to delete purchase order');
       }
     }
   };

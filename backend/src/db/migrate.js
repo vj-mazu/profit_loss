@@ -131,10 +131,12 @@ export async function runMigrations() {
     ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS egb_rate_per_qtl NUMERIC(12,2) DEFAULT 100;
     ALTER TABLE sales_bills ADD COLUMN IF NOT EXISTS brand_breakdown JSONB;
     ALTER TABLE sales_bills ADD COLUMN IF NOT EXISTS lorry_advance NUMERIC(12,2) DEFAULT 0;
-     ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS buying_brokerage_per_qtl NUMERIC(12,2) DEFAULT 0;
     ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS broker_name VARCHAR(150);
     ALTER TABLE trucks ADD COLUMN IF NOT EXISTS buying_brokerage_per_qtl NUMERIC(12,2) DEFAULT 0;
     ALTER TABLE trucks ADD COLUMN IF NOT EXISTS broker_name VARCHAR(150);
+    ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS purchase_cd_pct NUMERIC(5,2) DEFAULT 2.0;
+    ALTER TABLE trucks ADD COLUMN IF NOT EXISTS purchase_cd_pct NUMERIC(5,2) DEFAULT 2.0;
+    ALTER TABLE sales_bills ADD COLUMN IF NOT EXISTS payments JSONB DEFAULT '[]';
     ALTER TABLE trucks ALTER COLUMN brand TYPE VARCHAR(255);
     ALTER TABLE trucks ALTER COLUMN status SET DEFAULT 'UNLOADED';
     UPDATE trucks SET status = 'UNLOADED', unloading_date = COALESCE(unloading_date, date) WHERE status = 'IN_TRANSIT';

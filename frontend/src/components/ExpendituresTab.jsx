@@ -15,8 +15,8 @@ export default function ExpendituresTab() {
       setLoading(true);
       const [ordersRes, trucksRes, salesRes, mastersRes] = await Promise.all([
         api.getOrders(),
-        api.getTrucks({ limit: 100 }),
-        api.getSales({ limit: 100 }),
+        api.getTrucks({ limit: 500 }),
+        api.getSales({ limit: 500 }),
         api.getMasters().catch(() => ({ data: {} })),
       ]);
 
@@ -50,7 +50,7 @@ export default function ExpendituresTab() {
     // 2. Bags Transport Freight (Tempo/bus)
     const egbTrptCost = Number(o.bag_transport_cost || 0);
 
-    // 3. Inward Trucks Freight (LF)
+    // 3. Inward Trucks Freight (LF) - Mill -> Depot / Godown
     const linkedTrucks = trucks.filter((t) => Number(t.order_id) === Number(o.id));
     const totalLfFreight = linkedTrucks.reduce((sum, t) => {
       const tQtls = Number(t.qty_qtls) || 0;
@@ -61,23 +61,46 @@ export default function ExpendituresTab() {
     const totalLorryAdvance = linkedTrucks.reduce((sum, t) => sum + (Number(t.lorry_advance) || 0), 0);
     const balanceLfPayable = Math.max(0, totalLfFreight - totalLorryAdvance);
 
-    // 4. Mandi APMC Tax (0.60% of purchase or billing)
+    // 4. Sales Delivery Lorry Freight (LF) - Depot -> Wholesale Buyers
+    const linkedTruckIds = new Set(linkedTrucks.map((t) => Number(t.id)));
+    const linkedSales = sales.filter((s) => linkedTruckIds.has(Number(s.truck_id)));
+    const totalSalesLf = linkedSales.reduce((sum, s) => {
+      const sQtls = Number(s.qty_qtls) || 0;
+      const lfRate = Number(s.lf_rate) || 0;
+      const lorryAmt = s.lorry_amount !== null && s.lorry_amount !== undefined && Number(s.lorry_amount) > 0
+        ? Number(s.lorry_amount)
+        : Math.round(sQtls * lfRate);
+      return sum + lorryAmt;
+    }, 0);
+
+    const totalSalesLfAdvance = linkedSales.reduce((sum, s) => sum + (Number(s.lorry_advance) || 0), 0);
+    const totalSalesLfBalance = linkedSales.reduce((sum, s) => {
+      const sQtls = Number(s.qty_qtls) || 0;
+      const lfRate = Number(s.lf_rate) || 0;
+      const lorryAmt = s.lorry_amount !== null && s.lorry_amount !== undefined && Number(s.lorry_amount) > 0
+        ? Number(s.lorry_amount)
+        : Math.round(sQtls * lfRate);
+      const adv = Number(s.lorry_advance) || 0;
+      return sum + Math.max(0, lorryAmt - adv);
+    }, 0);
+
+    // 5. Mandi APMC Tax (0.60% of purchase or billing)
     const apmcPct = settings.apmc_pct !== undefined ? Number(settings.apmc_pct) : 0.6;
     const purchaseVal = linkedTrucks.reduce((sum, t) => sum + (Number(t.purchase_amount) || 0), 0) || (contractedQtls * (Number(o.rate_per_qtl) || 0));
     const apmcCost = Math.round(purchaseVal * (apmcPct / 100));
 
-    // 5. IT / TCS (0.39%)
+    // 6. IT / TCS (0.39%)
     const itTcsPct = settings.it_tcs_pct !== undefined ? Number(settings.it_tcs_pct) : 0.39;
     const itTcsCost = Math.round(purchaseVal * (itTcsPct / 100));
 
-    // 6. Brokerages (Inward Buying Brokerage + Selling Brokerage)
+    // 7. Brokerages (Inward Buying Brokerage + Selling Brokerage)
     const buyerBrokerageRate = o.buying_brokerage_per_qtl !== undefined && o.buying_brokerage_per_qtl !== null && Number(o.buying_brokerage_per_qtl) > 0
       ? Number(o.buying_brokerage_per_qtl)
       : (Number(settings.delhi_brokerage_default) || 0);
     const sellerBrokerageRate = Number(settings.kasat_brokerage_default || 40);
     const totalBrokerage = Math.round(effectiveQtls * (buyerBrokerageRate + sellerBrokerageRate));
 
-    // Total Expenses
+    // Total Operating Expenses (Direct procurement & inbound landed cost + levies + brokerage)
     const grandTotalExpense = egbCost + egbTrptCost + totalLfFreight + apmcCost + itTcsCost + totalBrokerage;
     const expensePerQtl = effectiveQtls > 0 ? Math.round((grandTotalExpense / effectiveQtls) * 100) / 100 : 0;
 
@@ -92,6 +115,9 @@ export default function ExpendituresTab() {
       totalLfFreight,
       totalLorryAdvance,
       balanceLfPayable,
+      totalSalesLf,
+      totalSalesLfAdvance,
+      totalSalesLfBalance,
       apmcCost,
       itTcsCost,
       buyerBrokerageRate,
@@ -100,13 +126,21 @@ export default function ExpendituresTab() {
       grandTotalExpense,
       expensePerQtl,
       trucksCount: linkedTrucks.length,
+      salesCount: linkedSales.length,
     };
   });
 
   // Aggregates
   const totalEgbCost = orderExpenses.reduce((s, e) => s + e.egbCost, 0);
   const totalEgbTrpt = orderExpenses.reduce((s, e) => s + e.egbTrptCost, 0);
-  const totalLf = orderExpenses.reduce((s, e) => s + e.totalLfFreight, 0);
+  const totalInwardLf = orderExpenses.reduce((s, e) => s + e.totalLfFreight, 0);
+  const totalInwardLfAdvance = orderExpenses.reduce((s, e) => s + e.totalLorryAdvance, 0);
+  const totalInwardLfBalance = orderExpenses.reduce((s, e) => s + e.balanceLfPayable, 0);
+
+  const totalSalesLf = orderExpenses.reduce((s, e) => s + e.totalSalesLf, 0);
+  const totalSalesLfAdvance = orderExpenses.reduce((s, e) => s + e.totalSalesLfAdvance, 0);
+  const totalSalesLfBalance = orderExpenses.reduce((s, e) => s + e.totalSalesLfBalance, 0);
+
   const totalApmc = orderExpenses.reduce((s, e) => s + e.apmcCost, 0);
   const totalBrokerage = orderExpenses.reduce((s, e) => s + e.totalBrokerage, 0);
   const totalItTcs = orderExpenses.reduce((s, e) => s + e.itTcsCost, 0);
@@ -133,13 +167,40 @@ export default function ExpendituresTab() {
             <h1 className="text-xl font-black text-slate-900 tracking-tight">Consolidated Expenditures & Operating Costs</h1>
           </div>
           <p className="text-xs font-semibold text-slate-500 mt-1">
-            Complete cost auditing per order: Empty Gunny Bags, Transport, Lorry Freight (LF), Mandi Taxes, TCS, and Brokerages
+            Complete cost auditing per order: Inward LF (Mill → Depot), Sales Delivery LF (Depot → Buyer), Empty Gunny Bags, Transport, Mandi Taxes, TCS, and Brokerages
           </p>
         </div>
       </div>
 
+      {/* Two LF Channels Explanation Banner */}
+      <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 text-white p-4 rounded-xl shadow-xs border border-blue-800">
+        <div className="flex items-center space-x-2 text-amber-300 font-extrabold text-xs uppercase tracking-wider mb-2">
+          <Layers className="w-4 h-4 text-amber-400" />
+          <span>Two Separate Lorry Freight (LF) Channels & Advance Splits</span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          <div className="bg-white/10 p-2.5 rounded-lg border border-white/15">
+            <div className="font-bold text-blue-200 flex items-center space-x-1.5 mb-1">
+              <span>🚚 1. Inward Lorry Freight (Mill → Depot / Godown):</span>
+            </div>
+            <p className="text-slate-200 text-[11px] leading-relaxed">
+              Incurred when bringing rice from UP/MP mills to Delhi godown. Total LF = <strong className="text-amber-300">Advance Paid at Mill</strong> + <strong className="text-emerald-300">Driver Balance Paid at Unloading</strong>. This forms part of the direct procurement landed cost.
+            </p>
+          </div>
+          <div className="bg-white/10 p-2.5 rounded-lg border border-white/15">
+            <div className="font-bold text-sky-200 flex items-center space-x-1.5 mb-1">
+              <span>🚛 2. Sales Delivery Freight (Depot → Wholesale Buyer):</span>
+            </div>
+            <p className="text-slate-200 text-[11px] leading-relaxed">
+              Incurred when delivering stock to wholesale buyers. Total LF = <strong className="text-amber-300">Seller Advance Paid</strong> + <strong className="text-sky-300">Driver Balance Paid by Buyer</strong>. The buyer pays the driver the balance upon delivery and deducts only that balance from your bill, reimbursing your advance.
+            </p>
+          </div>
+        </div>
+      </div>
+
       {/* Aggregate KPI Summary Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
+        {/* Row 1 */}
         <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-amber-500 shadow-2xs">
           <span className="text-[10px] font-bold text-slate-500 uppercase block">Empty Bags Cost</span>
           <div className="text-base font-black text-amber-900 mt-1 table-number">
@@ -156,14 +217,37 @@ export default function ExpendituresTab() {
           <span className="text-[10px] text-slate-400 font-medium">Tempo/bus freight</span>
         </div>
 
-        <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-blue-500 shadow-2xs">
-          <span className="text-[10px] font-bold text-slate-500 uppercase block">Lorry Freight (LF)</span>
-          <div className="text-base font-black text-blue-900 mt-1 table-number">
-            ₹{totalLf.toLocaleString('en-IN')}
+        <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-blue-600 shadow-2xs">
+          <div className="flex justify-between items-center">
+            <span className="text-[10px] font-bold text-blue-900 uppercase block">Inward LF (Mill → Depot)</span>
+            <span className="text-[9px] font-black bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded">Inward</span>
           </div>
-          <span className="text-[10px] text-slate-400 font-medium">Driver transport</span>
+          <div className="text-base font-black text-blue-950 mt-1 table-number">
+            ₹{totalInwardLf.toLocaleString('en-IN')}
+          </div>
+          <div className="flex items-center space-x-1.5 text-[10px] text-slate-600 mt-0.5">
+            <span className="font-bold text-amber-800">Adv: ₹{totalInwardLfAdvance.toLocaleString('en-IN')}</span>
+            <span>•</span>
+            <span className="font-bold text-blue-800">Bal: ₹{totalInwardLfBalance.toLocaleString('en-IN')}</span>
+          </div>
         </div>
 
+        <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-sky-500 shadow-2xs">
+          <div className="flex justify-between items-center">
+            <span className="text-[10px] font-bold text-sky-900 uppercase block">Sales Delivery LF</span>
+            <span className="text-[9px] font-black bg-sky-100 text-sky-800 px-1.5 py-0.2 rounded">Outward</span>
+          </div>
+          <div className="text-base font-black text-sky-950 mt-1 table-number">
+            ₹{totalSalesLf.toLocaleString('en-IN')}
+          </div>
+          <div className="flex items-center space-x-1.5 text-[10px] text-slate-600 mt-0.5">
+            <span className="font-bold text-amber-800">Adv: ₹{totalSalesLfAdvance.toLocaleString('en-IN')}</span>
+            <span>•</span>
+            <span className="font-bold text-sky-800">Buyer: ₹{totalSalesLfBalance.toLocaleString('en-IN')}</span>
+          </div>
+        </div>
+
+        {/* Row 2 */}
         <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-emerald-500 shadow-2xs">
           <span className="text-[10px] font-bold text-slate-500 uppercase block">APMC Mandi Tax</span>
           <div className="text-base font-black text-emerald-800 mt-1 table-number">
@@ -172,20 +256,20 @@ export default function ExpendituresTab() {
           <span className="text-[10px] text-slate-400 font-medium">Standard 0.60%</span>
         </div>
 
-        <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-purple-500 shadow-2xs">
-          <span className="text-[10px] font-bold text-slate-500 uppercase block">Total Brokerage</span>
-          <div className="text-base font-black text-purple-900 mt-1 table-number">
-            ₹{totalBrokerage.toLocaleString('en-IN')}
-          </div>
-          <span className="text-[10px] text-slate-400 font-medium">Buyer + Mill</span>
-        </div>
-
         <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-indigo-500 shadow-2xs">
           <span className="text-[10px] font-bold text-slate-500 uppercase block">Income Tax / TCS</span>
           <div className="text-base font-black text-indigo-900 mt-1 table-number">
             ₹{totalItTcs.toLocaleString('en-IN')}
           </div>
           <span className="text-[10px] text-slate-400 font-medium">Standard 0.39%</span>
+        </div>
+
+        <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-purple-500 shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase block">Total Brokerage</span>
+          <div className="text-base font-black text-purple-900 mt-1 table-number">
+            ₹{totalBrokerage.toLocaleString('en-IN')}
+          </div>
+          <span className="text-[10px] text-slate-400 font-medium">Buyer + Mill</span>
         </div>
 
         <div className="bg-white p-3 rounded-xl border border-slate-200 border-l-4 border-l-rose-600 shadow-2xs">
@@ -204,11 +288,11 @@ export default function ExpendituresTab() {
             <div className="flex items-center space-x-2">
               <Receipt className="w-4 h-4 text-purple-700" />
               <h2 className="text-sm font-extrabold text-slate-900 uppercase tracking-wider">
-                Order-Wise Detailed Costing Sheet
+                Order-Wise Detailed Costing Sheet & LF Splits
               </h2>
             </div>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Live breakdown of all operational expenses per contract matching the master formulas
+              Live breakdown of all operational expenses per contract with separated Inward LF and Sales Delivery LF
             </p>
           </div>
 
@@ -233,7 +317,8 @@ export default function ExpendituresTab() {
                 <th className="py-2.5 px-3 text-right border-r border-blue-400/40">Lifted / Qty (Q)</th>
                 <th className="py-2.5 px-3 text-right border-r border-blue-400/40">EGB Bags Cost</th>
                 <th className="py-2.5 px-3 text-right border-r border-blue-400/40">Bags Transport</th>
-                <th className="py-2.5 px-3 text-right border-r border-blue-400/40">Lorry Freight (LF)</th>
+                <th className="py-2.5 px-3 text-right border-r border-blue-400/40 bg-blue-800/80">Inward LF (Mill → Depot)</th>
+                <th className="py-2.5 px-3 text-right border-r border-blue-400/40 bg-sky-800/80">Sales Delivery LF</th>
                 <th className="py-2.5 px-3 text-right border-r border-blue-400/40">APMC Mandi Tax</th>
                 <th className="py-2.5 px-3 text-right border-r border-blue-400/40">TCS (0.39%)</th>
                 <th className="py-2.5 px-3 text-right border-r border-blue-400/40">Brokerage</th>
@@ -244,7 +329,7 @@ export default function ExpendituresTab() {
             <tbody className="font-medium text-slate-700 divide-y divide-slate-200">
               {filteredExpenses.length === 0 ? (
                 <tr>
-                  <td colSpan="11" className="py-12 text-center text-slate-400 italic">
+                  <td colSpan="12" className="py-12 text-center text-slate-400 italic">
                     No expense records found.
                   </td>
                 </tr>
@@ -271,14 +356,35 @@ export default function ExpendituresTab() {
                       <td className="py-2.5 px-3 text-right table-number font-semibold text-orange-900 border-r border-b border-slate-300">
                         {e.egbTrptCost > 0 ? `₹${e.egbTrptCost.toLocaleString('en-IN')}` : '-'}
                       </td>
-                      <td className="py-2.5 px-3 text-right table-number font-bold text-blue-900 border-r border-b border-slate-300">
-                        ₹{e.totalLfFreight.toLocaleString('en-IN')}
-                        {e.totalLorryAdvance > 0 && (
-                          <span className="block text-[9px] text-amber-700 font-normal">
-                            Adv: ₹{e.totalLorryAdvance.toLocaleString('en-IN')}
-                          </span>
+                      
+                      {/* Inward LF Split */}
+                      <td className="py-2.5 px-3 text-right table-number font-bold text-blue-950 border-r border-b border-slate-300 bg-blue-50/30">
+                        <div>₹{e.totalLfFreight.toLocaleString('en-IN')}</div>
+                        {e.totalLfFreight > 0 && (
+                          <div className="text-[9px] space-x-1 font-normal text-slate-600">
+                            <span className="text-amber-800 font-semibold">Adv: ₹{e.totalLorryAdvance.toLocaleString('en-IN')}</span>
+                            <span>•</span>
+                            <span className="text-blue-800 font-semibold">Bal: ₹{e.balanceLfPayable.toLocaleString('en-IN')}</span>
+                          </div>
                         )}
                       </td>
+
+                      {/* Sales Delivery LF Split */}
+                      <td className="py-2.5 px-3 text-right table-number font-bold text-sky-950 border-r border-b border-slate-300 bg-sky-50/30">
+                        {e.totalSalesLf > 0 ? (
+                          <>
+                            <div>₹{e.totalSalesLf.toLocaleString('en-IN')}</div>
+                            <div className="text-[9px] space-x-1 font-normal text-slate-600">
+                              <span className="text-amber-800 font-semibold">Adv: ₹{e.totalSalesLfAdvance.toLocaleString('en-IN')}</span>
+                              <span>•</span>
+                              <span className="text-sky-800 font-semibold">Buyer: ₹{e.totalSalesLfBalance.toLocaleString('en-IN')}</span>
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-slate-400 font-normal">-</span>
+                        )}
+                      </td>
+
                       <td className="py-2.5 px-3 text-right table-number font-semibold text-emerald-800 border-r border-b border-slate-300">
                         ₹{e.apmcCost.toLocaleString('en-IN')}
                       </td>
@@ -314,8 +420,17 @@ export default function ExpendituresTab() {
                   <td className="py-2.5 px-3 text-right table-number border-r border-slate-300 text-orange-900">
                     ₹{totalEgbTrpt.toLocaleString('en-IN')}
                   </td>
-                  <td className="py-2.5 px-3 text-right table-number border-r border-slate-300 text-blue-900">
-                    ₹{totalLf.toLocaleString('en-IN')}
+                  <td className="py-2.5 px-3 text-right table-number border-r border-slate-300 text-blue-950 bg-blue-50/50">
+                    <div>₹{totalInwardLf.toLocaleString('en-IN')}</div>
+                    <div className="text-[9px] font-normal text-slate-600">
+                      Adv: ₹{totalInwardLfAdvance.toLocaleString('en-IN')} • Bal: ₹{totalInwardLfBalance.toLocaleString('en-IN')}
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-3 text-right table-number border-r border-slate-300 text-sky-950 bg-sky-50/50">
+                    <div>₹{totalSalesLf.toLocaleString('en-IN')}</div>
+                    <div className="text-[9px] font-normal text-slate-600">
+                      Adv: ₹{totalSalesLfAdvance.toLocaleString('en-IN')} • Buyer: ₹{totalSalesLfBalance.toLocaleString('en-IN')}
+                    </div>
                   </td>
                   <td className="py-2.5 px-3 text-right table-number border-r border-slate-300 text-emerald-900">
                     ₹{totalApmc.toLocaleString('en-IN')}

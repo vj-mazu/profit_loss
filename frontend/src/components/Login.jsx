@@ -62,8 +62,11 @@ function RiceMillLogo({ className = "w-16 h-16" }) {
   );
 }
 
+import { useToast } from '../context/ToastContext';
+
 export default function Login() {
   const { login } = useAuth();
+  const toast = useToast();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -76,8 +79,11 @@ export default function Login() {
     setLoading(true);
     try {
       await login(username, password);
+      toast.success(`Welcome back, ${username}!`, 'Login Successful');
     } catch (err) {
-      setError(err.response?.data?.message || 'Invalid username or password');
+      const msg = err.response?.data?.message || err.message || 'Invalid username or password';
+      setError(msg);
+      toast.error(msg, 'Login Failed');
     } finally {
       setLoading(false);
     }

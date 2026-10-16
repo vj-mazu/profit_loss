@@ -71,6 +71,8 @@ router.get('/', authenticate, async (req, res) => {
         COALESCE(SUM(s.discount_amount), 0) as total_discount_amount,
         COALESCE(SUM(s.cutting_amount), 0) as total_cutting_amount,
         COALESCE(SUM(s.brokerage_amount), 0) as total_brokerage_amount,
+        COALESCE(SUM(s.interest_amount) FILTER (WHERE s.interest_type = 'EARNED'), 0) as interest_earned,
+        COALESCE(SUM(s.interest_amount) FILTER (WHERE s.interest_type = 'LOSS'), 0) as interest_loss,
         COUNT(s.brokerage_per_qtl) as custom_brokerage_count
       FROM trucks t
       LEFT JOIN purchase_orders po ON t.order_id = po.id
@@ -88,9 +90,10 @@ router.get('/', authenticate, async (req, res) => {
       const qtls = Number(r.qty_qtls) || 0;
       const salesAmt = Number(r.total_sales_amount) || 0;
       const receivedAmt = Number(r.total_received_amount) || 0;
+      const cdPct = r.purchase_cd_pct !== null && r.purchase_cd_pct !== undefined ? Number(r.purchase_cd_pct) : 2.0;
       const purchasePaid = r.purchase_payment_amount 
         ? Number(r.purchase_payment_amount) 
-        : Math.round(Number(r.purchase_amount || 0) * 0.98 * 100) / 100;
+        : Math.round(Number(r.purchase_amount || 0) * (1 - cdPct / 100) * 100) / 100;
       const apmc = Math.round((salesAmt * 0.006) * 100) / 100;
       const itTcs = Math.round((salesAmt * 0.0039) * 100) / 100;
       const egb = Math.round(qtls * 100 * 100) / 100;
@@ -105,7 +108,10 @@ router.get('/', authenticate, async (req, res) => {
 
       const effectiveInflow = receivedAmt > 0 ? receivedAmt : salesAmt;
       const hasSales = Number(r.sales_count) > 0;
-      const netProfit = hasSales ? Math.round((effectiveInflow - cogs) * 100) / 100 : null;
+      const delayInterest = Number(r.purchase_delay_interest || 0) + Number(r.interest_loss || 0);
+      const earnedInterest = Number(r.interest_earned || 0);
+      const tradingProfit = effectiveInflow - cogs;
+      const netProfit = hasSales ? Math.round((tradingProfit - delayInterest + earnedInterest) * 100) / 100 : null;
       const profitPerQtl = netProfit !== null && qtls > 0 ? Math.round((netProfit / qtls) * 100) / 100 : null;
 
       return {
@@ -177,6 +183,11 @@ router.post('/', authenticate, async (req, res) => {
       remarks,
       buying_brokerage_per_qtl,
       broker_name,
+      purchase_cd_pct,
+      purchase_payment_amount,
+      purchase_payment_date,
+      purchase_payment_mode,
+      purchase_payment_ref,
     } = req.body;
 
     // ---- Entry validation (mirror the user's Excel discipline) ----
@@ -284,13 +295,21 @@ router.post('/', authenticate, async (req, res) => {
       : (linkedPo ? Number(linkedPo.buying_brokerage_per_qtl || 0) : 0);
     const effectiveBrokerName = broker_name || (linkedPo ? linkedPo.broker_name || '' : '');
 
+    const effectiveCdPct = purchase_cd_pct !== undefined && purchase_cd_pct !== '' && purchase_cd_pct !== null
+      ? Number(purchase_cd_pct)
+      : (linkedPo && linkedPo.purchase_cd_pct !== null && linkedPo.purchase_cd_pct !== undefined ? Number(linkedPo.purchase_cd_pct) : 2.0);
+    const effectivePaymentAmount = purchase_payment_amount !== undefined && purchase_payment_amount !== '' && purchase_payment_amount !== null
+      ? Number(purchase_payment_amount)
+      : Math.round(calculatedAmount * (1 - effectiveCdPct / 100) * 100) / 100;
+
     const result = await query(
       `INSERT INTO trucks (
         order_id, truck_serial, truck_number, truck_lf, date, purchase_bill_no, seller_name,
         bags, qty_qtls, rate_per_qtl, purchase_amount, lorry_advance, lf_balance, brand, brand_breakdown,
         origin_location, dest_location, unloading_date, status, remarks, kg_per_bag,
-        buying_brokerage_per_qtl, broker_name
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+        buying_brokerage_per_qtl, broker_name, purchase_cd_pct, purchase_payment_amount,
+        purchase_payment_date, purchase_payment_mode, purchase_payment_ref
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
       RETURNING *`,
       [
         order_id ? Number(order_id) : null,
@@ -316,13 +335,18 @@ router.post('/', authenticate, async (req, res) => {
         kgPerBag,
         effectiveBuyingBrokerage,
         effectiveBrokerName,
+        effectiveCdPct,
+        effectivePaymentAmount,
+        purchase_payment_date || null,
+        purchase_payment_mode || null,
+        purchase_payment_ref || null,
       ]
     );
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Error creating truck:', err);
-    res.status(500).json({ message: 'Failed to create truck entry' });
+    res.status(500).json({ message: err.message || 'Failed to create truck entry' });
   }
 });
 
@@ -350,6 +374,9 @@ router.put('/:id', authenticate, async (req, res) => {
       remarks,
       purchase_payment_amount,
       purchase_payment_date,
+      purchase_payment_mode,
+      purchase_payment_ref,
+      purchase_cd_pct,
       sale_amount_received_date,
       purchase_gap_days,
       purchase_delay_interest,
@@ -386,6 +413,10 @@ router.put('/:id', authenticate, async (req, res) => {
       ? Number(buying_brokerage_per_qtl)
       : null;
 
+    const nextCdPct = purchase_cd_pct !== undefined && purchase_cd_pct !== '' && purchase_cd_pct !== null
+      ? Number(purchase_cd_pct)
+      : null;
+
     const result = await query(
       `UPDATE trucks SET
         order_id = COALESCE($1, order_id),
@@ -415,8 +446,11 @@ router.put('/:id', authenticate, async (req, res) => {
         kg_per_bag = COALESCE($24, kg_per_bag),
         brand_breakdown = COALESCE($25, brand_breakdown),
         buying_brokerage_per_qtl = COALESCE($26, buying_brokerage_per_qtl),
-        broker_name = COALESCE($27, broker_name)
-       WHERE id = $28
+        broker_name = COALESCE($27, broker_name),
+        purchase_cd_pct = COALESCE($28, purchase_cd_pct),
+        purchase_payment_mode = COALESCE($29, purchase_payment_mode),
+        purchase_payment_ref = COALESCE($30, purchase_payment_ref)
+       WHERE id = $31
        RETURNING *`,
       [
         order_id !== undefined ? (order_id ? Number(order_id) : null) : null,
@@ -437,8 +471,8 @@ router.put('/:id', authenticate, async (req, res) => {
         unloading_date,
         status,
         remarks,
-        purchase_payment_amount,
-        purchase_payment_date,
+        purchase_payment_amount !== undefined ? (purchase_payment_amount !== '' && purchase_payment_amount !== null ? Number(purchase_payment_amount) : null) : null,
+        purchase_payment_date !== undefined ? purchase_payment_date : null,
         sale_amount_received_date,
         purchase_gap_days,
         purchase_delay_interest,
@@ -446,6 +480,9 @@ router.put('/:id', authenticate, async (req, res) => {
         formattedBrandBreakdown,
         nextBuyingBrokerage,
         broker_name !== undefined ? broker_name : null,
+        nextCdPct,
+        purchase_payment_mode !== undefined ? purchase_payment_mode : null,
+        purchase_payment_ref !== undefined ? purchase_payment_ref : null,
         id,
       ]
     );
@@ -453,7 +490,7 @@ router.put('/:id', authenticate, async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Error updating truck:', err);
-    res.status(500).json({ message: 'Failed to update truck' });
+    res.status(500).json({ message: err.message || 'Failed to update truck' });
   }
 });
 
@@ -464,7 +501,7 @@ router.delete('/:id', authenticate, async (req, res) => {
     await query('DELETE FROM trucks WHERE id = $1', [id]);
     res.json({ message: 'Truck deleted successfully' });
   } catch (err) {
-    res.status(500).json({ message: 'Failed to delete truck' });
+    res.status(500).json({ message: err.message || 'Failed to delete truck' });
   }
 });
 

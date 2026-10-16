@@ -21,10 +21,12 @@ import api from '../services/api';
 import FilterBar from './FilterBar';
 import Modal from './Modal';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 import { exportTrucksPdf } from '../utils/pdfExport';
 
 export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettlement }) {
   const { isAdmin } = useAuth();
+  const toast = useToast();
   const [trucks, setTrucks] = useState([]);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +82,11 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
     unloading_date: new Date().toISOString().split('T')[0],
     status: 'UNLOADED',
     remarks: '',
+    purchase_cd_pct: '2.0',
+    purchase_payment_date: '',
+    purchase_payment_mode: 'RTGS/NEFT',
+    purchase_payment_ref: '',
+    purchase_payment_amount: '',
   });
 
   const loadTrucks = async (targetCursor = cursor) => {
@@ -208,6 +215,11 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
       unloading_date: new Date().toISOString().split('T')[0],
       status: 'UNLOADED',
       remarks: '',
+      purchase_cd_pct: firstActiveOrder?.purchase_cd_pct !== null && firstActiveOrder?.purchase_cd_pct !== undefined ? String(firstActiveOrder.purchase_cd_pct) : '2.0',
+      purchase_payment_date: '',
+      purchase_payment_mode: 'RTGS/NEFT',
+      purchase_payment_ref: '',
+      purchase_payment_amount: '',
     });
     setIsModalOpen(true);
   };
@@ -261,6 +273,11 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
       unloading_date: truck.unloading_date ? new Date(truck.unloading_date).toISOString().split('T')[0] : (truck.date ? new Date(truck.date).toISOString().split('T')[0] : ''),
       status: truck.status || 'UNLOADED',
       remarks: truck.remarks || '',
+      purchase_cd_pct: truck.purchase_cd_pct !== null && truck.purchase_cd_pct !== undefined ? String(truck.purchase_cd_pct) : '2.0',
+      purchase_payment_date: truck.purchase_payment_date ? new Date(truck.purchase_payment_date).toISOString().split('T')[0] : '',
+      purchase_payment_mode: truck.purchase_payment_mode || 'RTGS/NEFT',
+      purchase_payment_ref: truck.purchase_payment_ref || '',
+      purchase_payment_amount: truck.purchase_payment_amount !== null && truck.purchase_payment_amount !== undefined ? String(truck.purchase_payment_amount) : '',
     });
     setIsModalOpen(true);
   };
@@ -300,6 +317,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
           rate_per_qtl: selectedOrder.rate_per_qtl || prev.rate_per_qtl,
           buying_brokerage_per_qtl: selectedOrder.buying_brokerage_per_qtl !== undefined && selectedOrder.buying_brokerage_per_qtl !== null ? selectedOrder.buying_brokerage_per_qtl : prev.buying_brokerage_per_qtl,
           broker_name: selectedOrder.broker_name || prev.broker_name,
+          purchase_cd_pct: selectedOrder.purchase_cd_pct !== null && selectedOrder.purchase_cd_pct !== undefined ? String(selectedOrder.purchase_cd_pct) : prev.purchase_cd_pct,
           kg_per_bag: String(orderKg),
           brand: currentBrands.length === 1 ? currentBrands[0] : prev.brand,
           selected_brands: currentBrands,
@@ -450,7 +468,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
 
         const breakdownSum = Object.values(finalBrandBreakdown).reduce((a, b) => a + b, 0);
         if (breakdownSum !== bags) {
-          alert(`Calculation Error: Sum of bags in brand breakdown (${breakdownSum.toLocaleString('en-IN')}) does not match Total Bags (${bags.toLocaleString('en-IN')}). Please click 'Auto-Distribute Evenly' or adjust the color bag counts.`);
+          toast.warning(`Sum of bags in brand breakdown (${breakdownSum.toLocaleString('en-IN')}) does not match Total Bags (${bags.toLocaleString('en-IN')}). Please click 'Auto-Distribute Evenly' or adjust the color bag counts.`, 'Breakdown Mismatch');
           return;
         }
 
@@ -471,7 +489,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
           const orderRemainingTotal = Math.max(0, Number(linkedOrder.remaining_bags) || 0) + prevTruckBags;
 
           if (bags > orderRemainingTotal && Number(linkedOrder.bags_given) > 0) {
-            alert(`Validation Error: Cannot lift ${bags.toLocaleString('en-IN')} bags. Only ${orderRemainingTotal.toLocaleString('en-IN')} bags remaining on Contract ${linkedOrder.contract_no}!`);
+            toast.warning(`Cannot lift ${bags.toLocaleString('en-IN')} bags. Only ${orderRemainingTotal.toLocaleString('en-IN')} bags remaining on Contract ${linkedOrder.contract_no}!`, 'Contract Limit Exceeded');
             return;
           }
 
@@ -498,7 +516,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
                 }
                 const availableForCol = Math.max(0, Number(match[1].remaining) || 0) + prevColorBags;
                 if (countVal > availableForCol && Number(match[1].sent) > 0) {
-                  alert(`Validation Error: Cannot lift ${countVal.toLocaleString('en-IN')} bags of ${colName}. Only ${availableForCol.toLocaleString('en-IN')} bags of ${colName} remain on Contract ${linkedOrder.contract_no}!`);
+                  toast.warning(`Cannot lift ${countVal.toLocaleString('en-IN')} bags of ${colName}. Only ${availableForCol.toLocaleString('en-IN')} bags of ${colName} remain on Contract ${linkedOrder.contract_no}!`, 'Bag Color Limit Exceeded');
                   return;
                 }
               }
@@ -506,6 +524,12 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
           }
         }
       }
+
+      const calcCdPctForSubmit = formData.purchase_cd_pct !== '' && formData.purchase_cd_pct !== null && formData.purchase_cd_pct !== undefined
+        ? Number(formData.purchase_cd_pct)
+        : 2.0;
+      const calcPurchaseForSubmit = computedQty * (Number(formData.rate_per_qtl) || 0);
+      const calcNetForSubmit = Math.round((calcPurchaseForSubmit * (1 - calcCdPctForSubmit / 100)) * 100) / 100;
 
       const payload = {
         ...formData,
@@ -520,17 +544,27 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
         broker_name: formData.broker_name?.trim() || '',
         brand: finalBrand,
         brand_breakdown: finalBrandBreakdown,
+        purchase_cd_pct: calcCdPctForSubmit,
+        purchase_payment_date: formData.purchase_payment_date || null,
+        purchase_payment_mode: formData.purchase_payment_mode || null,
+        purchase_payment_ref: formData.purchase_payment_ref?.trim() || null,
+        purchase_payment_amount: formData.purchase_payment_amount !== '' && formData.purchase_payment_amount !== null
+          ? Number(formData.purchase_payment_amount)
+          : calcNetForSubmit,
       };
 
       if (editingTruckId) {
         await api.updateTruck(editingTruckId, payload);
+        toast.success(`Inward Truck ${payload.truck_serial} (${payload.truck_number}) updated successfully!`, 'Truck Updated');
       } else {
         await api.createTruck(payload);
+        toast.success(`Inward Truck ${payload.truck_serial} (${payload.truck_number}) created successfully!`, 'Inward Truck Created');
       }
       setIsModalOpen(false);
       loadTrucks(cursor);
     } catch (err) {
-      alert(err.response?.data?.message || (editingTruckId ? 'Failed to update truck dispatch' : 'Failed to create truck dispatch'));
+      const errMsg = err.response?.data?.message || err.message || (editingTruckId ? 'Failed to update truck dispatch' : 'Failed to create truck dispatch');
+      toast.error(errMsg, 'Inward Save Failed');
     }
   };
 
@@ -541,9 +575,10 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
         unloading_date: today,
         status: 'UNLOADED',
       });
+      toast.success(`Truck ${truck.truck_serial} marked as UNLOADED!`, 'Status Updated');
       loadTrucks(cursor);
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to update unloading status');
+      toast.error(err.response?.data?.message || 'Failed to update unloading status', 'Update Failed');
     }
   };
 
@@ -551,9 +586,10 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
     if (window.confirm(`Are you sure you want to delete ${truck.truck_serial} (${truck.truck_number}) and all associated bills?`)) {
       try {
         await api.deleteTruck(truck.id);
+        toast.info(`Truck ${truck.truck_serial} (${truck.truck_number}) deleted successfully.`, 'Truck Deleted');
         loadTrucks(cursor);
       } catch (err) {
-        alert(err.response?.data?.message || 'Failed to delete truck');
+        toast.error(err.response?.data?.message || 'Failed to delete truck', 'Delete Failed');
       }
     }
   };
@@ -573,6 +609,11 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
   const calcPurchaseAmount = calcQtls * calcRate;
   const calcTotalFreight = calcQtls * calcLF;
   const calcLorryBalance = calcTotalFreight - calcAdvance;
+  const calcCdPct = formData.purchase_cd_pct !== '' && formData.purchase_cd_pct !== null && formData.purchase_cd_pct !== undefined
+    ? Number(formData.purchase_cd_pct)
+    : 2.0;
+  const calcCdAmount = Math.round((calcPurchaseAmount * (calcCdPct / 100)) * 100) / 100;
+  const calcNetPayableToMill = Math.round((calcPurchaseAmount - calcCdAmount) * 100) / 100;
   const breakdownSum = formData.selected_brands?.length > 1
     ? Object.values(formData.brand_breakdown || {}).reduce((acc, curr) => acc + (Number(curr) || 0), 0)
     : Number(formData.bags) || 0;
@@ -662,6 +703,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">LF</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Amount (₹)</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Advance (₹)</th>
+                <th className="py-2.5 px-3 border-r border-blue-400/40 text-left">Mill Payment</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Net P&L (₹)</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Profit / Qtl</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-center">Brand</th>
@@ -673,7 +715,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
             <tbody className="divide-y divide-slate-200 font-medium text-slate-800">
               {loading ? (
                 <tr>
-                  <td colSpan="19" className="py-12 text-center text-slate-400 border border-slate-300">
+                  <td colSpan="20" className="py-12 text-center text-slate-400 border border-slate-300">
                     <div className="flex items-center justify-center space-x-2">
                       <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
                       <span>Loading inward trucks...</span>
@@ -682,7 +724,7 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
                 </tr>
               ) : trucks.length === 0 ? (
                 <tr>
-                  <td colSpan="19" className="py-16 text-center border border-slate-300">
+                  <td colSpan="20" className="py-16 text-center border border-slate-300">
                     <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3">
                       <Truck className="w-6 h-6" />
                     </div>
@@ -758,6 +800,29 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
                             </span>
                           </div>
                         )}
+                      </td>
+                      <td className="py-2.5 px-3 text-left border-r border-b border-slate-300 whitespace-nowrap">
+                        <div className="text-xs">
+                          <div className="flex items-center space-x-1.5">
+                            <span className="font-extrabold text-slate-900">
+                              ₹{Number(t.purchase_payment_amount || (Number(t.purchase_amount || 0) * (1 - (Number(t.purchase_cd_pct ?? 2) / 100)))).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                            </span>
+                            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-1.5 py-0.2 rounded border border-emerald-300">
+                              {t.purchase_cd_pct ?? 2}% CD
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-600 mt-0.5 flex items-center space-x-1">
+                            <span className="text-slate-400">Paid:</span>
+                            <span className={`font-semibold ${t.purchase_payment_date ? 'text-slate-800' : 'text-amber-700 italic'}`}>
+                              {t.purchase_payment_date ? new Date(t.purchase_payment_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : 'Due'}
+                            </span>
+                            {t.purchase_payment_mode && (
+                              <span className="text-[9px] bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
+                                {t.purchase_payment_mode}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </td>
                       <td className="py-2.5 px-3 text-right table-number border-r border-b border-slate-300">
                         {t.net_profit !== null && t.net_profit !== undefined ? (
@@ -1427,6 +1492,109 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
             </div>
           </div>
 
+          {/* Rice Mill Purchase Settlement & Cash Discount (CD) Card */}
+          <div className="p-3.5 bg-emerald-50/70 border border-emerald-300 rounded-xl space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs font-black text-emerald-950 uppercase tracking-wide block">
+                  🌾 Rice Mill Payment & Cash Discount (CD)
+                </span>
+                <span className="text-[11px] text-emerald-800 font-medium">
+                  Configurable mill discount & payment tracking (RTGS/NEFT/Cheque/Cash)
+                </span>
+              </div>
+              <span className="text-[10px] font-black bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded border border-emerald-300">
+                Net Mill Outflow: ₹{calcNetPayableToMill.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-slate-700 font-bold text-xs mb-1">
+                  Mill Cash Discount (CD %)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    placeholder="2.0"
+                    value={formData.purchase_cd_pct}
+                    onChange={(e) => setFormData({ ...formData, purchase_cd_pct: e.target.value })}
+                    className="w-full px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-bold text-slate-900 focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <span className="absolute right-2.5 top-1.5 text-[11px] font-bold text-emerald-700">
+                    -₹{calcCdAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-500 mt-0.5 block">
+                  Negotiable (e.g. 0%, 1%, 1.5%, 2%, 3%)
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold text-xs mb-1">
+                  Mill Payment Paid Date
+                </label>
+                <input
+                  type="date"
+                  value={formData.purchase_payment_date}
+                  onChange={(e) => setFormData({ ...formData, purchase_payment_date: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-bold text-slate-900 focus:ring-2 focus:ring-emerald-500"
+                />
+                <span className="text-[10px] text-slate-500 mt-0.5 block">
+                  Date Deeraj paid Manjunath (mill)
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold text-xs mb-1">
+                  Payment Mode
+                </label>
+                <select
+                  value={formData.purchase_payment_mode}
+                  onChange={(e) => setFormData({ ...formData, purchase_payment_mode: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-bold text-slate-900 focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="RTGS/NEFT">RTGS / NEFT</option>
+                  <option value="Bank Transfer">Bank Transfer / IMPS</option>
+                  <option value="Cheque">Cheque</option>
+                  <option value="Cash">Cash</option>
+                  <option value="UPI">UPI</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-emerald-200">
+              <div>
+                <label className="block text-slate-700 font-bold text-xs mb-1">
+                  Mill UTR / Cheque / Bank Ref No
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. UTR123456789 / CHQ-48201"
+                  value={formData.purchase_payment_ref}
+                  onChange={(e) => setFormData({ ...formData, purchase_payment_ref: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold text-xs mb-1">
+                  Actual Net Paid to Mill (₹)
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder={String(calcNetPayableToMill)}
+                  value={formData.purchase_payment_amount}
+                  onChange={(e) => setFormData({ ...formData, purchase_payment_amount: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-bold text-emerald-950 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-slate-700 font-bold mb-1">Unloaded / Received Date *</label>
@@ -1455,13 +1623,21 @@ export default function TrucksTab({ onSelectTruckForSales, onSelectTruckForSettl
             <div className="flex items-center justify-between font-bold text-slate-800">
               <span className="flex items-center space-x-1.5">
                 <Calculator className="w-4 h-4 text-emerald-600" />
-                <span>Total Purchase Amount:</span>
+                <span>Gross Purchase Value:</span>
               </span>
-              <span className="text-emerald-800 text-sm">
+              <span className="text-slate-800 text-sm">
                 ₹{calcPurchaseAmount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
               </span>
             </div>
-            <div className="flex items-center justify-between text-slate-500 text-[11px]">
+            <div className="flex items-center justify-between text-emerald-800 text-[11px] font-bold">
+              <span>Less: {calcCdPct}% Cash Discount (CD Benefit):</span>
+              <span>-₹{calcCdAmount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+            </div>
+            <div className="flex items-center justify-between font-extrabold text-slate-900 border-t border-slate-200 pt-1">
+              <span>Net Paid / Payable to Mill:</span>
+              <span className="text-emerald-900 text-sm">₹{calcNetPayableToMill.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+            </div>
+            <div className="flex items-center justify-between text-slate-500 text-[11px] pt-1">
               <span>Total Lorry Freight ({calcQtls} Qtls × ₹{calcLF}/Qtl):</span>
               <span className="font-semibold text-slate-700">₹{calcTotalFreight.toLocaleString('en-IN')}</span>
             </div>

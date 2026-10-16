@@ -23,9 +23,11 @@ import {
 } from 'lucide-react';
 import api from '../services/api';
 import FilterBar from './FilterBar';
+import { useToast } from '../context/ToastContext';
 import { exportTruckSettlementReceiptPdf, exportFleetPdf } from '../utils/pdfExport';
 
 export default function SettlementTab({ selectedTruckId }) {
+  const toast = useToast();
   const [viewMode, setViewMode] = useState('FLEET_SUMMARY'); // 'FLEET_SUMMARY' or 'TRUCK_AUDIT'
   const [trucks, setTrucks] = useState([]);
   const [selectedTruck, setSelectedTruck] = useState(null);
@@ -113,9 +115,9 @@ export default function SettlementTab({ selectedTruckId }) {
       // Also reload summary list
       const res = await api.getSettlementSummary();
       setTrucks(Array.isArray(res.data) ? res.data : []);
-      alert('Payment settlement updated successfully');
+      toast.success('Payment settlement updated successfully');
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to update payment settlement');
+      toast.error(err.response?.data?.message || 'Failed to update payment settlement');
     }
   };
 
@@ -148,7 +150,16 @@ export default function SettlementTab({ selectedTruckId }) {
     { value: 'SETTLED', label: 'Settled (Approved Admin)' },
   ];
 
-  // Helper to set 2% CD directly
+  // Helper to set dynamic CD directly
+  const handleAutoFillCD = () => {
+    if (truck?.purchase_amount) {
+      const cdPct = truck?.purchase_cd_pct !== null && truck?.purchase_cd_pct !== undefined ? Number(truck.purchase_cd_pct) : 2.0;
+      const netAmount = Math.round(Number(truck.purchase_amount) * (1 - cdPct / 100) * 100) / 100;
+      setPurchasePaymentAmount(String(netAmount));
+    }
+  };
+
+  // Helper to auto-fill standard 2% CD (Invoice x 0.98)
   const handleAutoFill2PercentCD = () => {
     if (truck?.purchase_amount) {
       const netAmount = Math.round(Number(truck.purchase_amount) * 0.98 * 100) / 100;
@@ -394,7 +405,7 @@ export default function SettlementTab({ selectedTruckId }) {
                           <td className="py-2.5 px-3 text-right table-number font-bold text-slate-900 border-r border-b border-slate-300">{Number(t.qty_qtls).toFixed(1)}</td>
                           <td className="py-2.5 px-3 text-right table-number font-medium border-r border-b border-slate-300">₹{Number(t.rate_per_qtl).toLocaleString('en-IN')}</td>
                           <td className="py-2.5 px-3 text-right table-number font-semibold text-slate-800 border-r border-b border-slate-300">
-                            ₹{Number(t.purchase_payment_amount || Number(t.purchase_amount) * 0.98).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                            ₹{Number(t.purchase_payment_amount || (Number(t.purchase_amount) * (1 - ((t.purchase_cd_pct !== null && t.purchase_cd_pct !== undefined ? Number(t.purchase_cd_pct) : 2.0) / 100)))).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                           </td>
                           <td className="py-2.5 px-3 text-left border-r border-b border-slate-300 whitespace-nowrap">
                             <div>
@@ -561,7 +572,16 @@ export default function SettlementTab({ selectedTruckId }) {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-slate-700 font-bold mb-1">Actual Paid to Mill (-2% CD)</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-slate-700 font-bold">Actual Paid to Mill</label>
+                    <button
+                      type="button"
+                      onClick={handleAutoFillCD}
+                      className="text-[10px] bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-2 py-0.5 rounded font-bold border border-emerald-200 cursor-pointer"
+                    >
+                      Auto-fill ({truck?.purchase_cd_pct ?? 2}% CD)
+                    </button>
+                  </div>
                   <input
                     type="number"
                     step="0.01"
@@ -757,7 +777,20 @@ export default function SettlementTab({ selectedTruckId }) {
                               <td className="py-2 px-3 text-right table-number text-slate-600 border-r border-slate-300">₹{Number(s.discount_amount || 0).toLocaleString('en-IN')}</td>
                               <td className="py-2 px-3 text-right table-number text-slate-600 border-r border-slate-300">₹{Number(s.cutting_amount || 0).toLocaleString('en-IN')}</td>
                               <td className="py-2 px-3 text-center text-slate-600 border-r border-slate-300">
-                                {s.sale_received_date ? new Date(s.sale_received_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '-'}
+                                {(() => {
+                                  let pList = [];
+                                  if (s.payments) {
+                                    try { pList = typeof s.payments === 'string' ? JSON.parse(s.payments) : s.payments; } catch (e) { pList = []; }
+                                  }
+                                  if (pList && pList.length > 1) {
+                                    return (
+                                      <span className="text-xs font-bold text-blue-900" title={pList.map((p, i) => `#${i+1}: ₹${Number(p.amount).toLocaleString('en-IN')} on ${p.date}`).join('\n')}>
+                                        {pList.length} parts
+                                      </span>
+                                    );
+                                  }
+                                  return s.sale_received_date ? new Date(s.sale_received_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '-';
+                                })()}
                               </td>
                               <td className="py-2 px-3 text-center table-number font-bold border-r border-slate-300">
                                 {s.interest_days !== undefined ? (
@@ -792,8 +825,14 @@ export default function SettlementTab({ selectedTruckId }) {
                           <td className="py-2 px-3 text-right table-number text-slate-700 border-r border-slate-300">₹{Number(metrics.totalDiscount || 0).toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right table-number text-slate-700 border-r border-slate-300">₹{Number(metrics.totalCutting || 0).toLocaleString('en-IN')}</td>
                           <td colSpan="2" className="border-r border-slate-300"></td>
-                          <td className="py-2 px-3 text-right table-number text-emerald-700">
-                            {Number(metrics.totalInterestEarned || 0) > 0 ? `+₹${Number(metrics.totalInterestEarned).toFixed(0)}` : '-'}
+                          <td className="py-2 px-3 text-right table-number font-black">
+                            {Number(metrics.totalInterestEarned || 0) > 0 && (
+                              <span className="text-emerald-700 block">+₹{Number(metrics.totalInterestEarned).toFixed(0)}</span>
+                            )}
+                            {Number(metrics.totalInterestLoss || 0) > 0 && (
+                              <span className="text-rose-700 block">-₹{Number(metrics.totalInterestLoss).toFixed(0)}</span>
+                            )}
+                            {!metrics.totalInterestEarned && !metrics.totalInterestLoss && '-'}
                           </td>
                         </tr>
                       </tfoot>
@@ -812,7 +851,7 @@ export default function SettlementTab({ selectedTruckId }) {
                         ⬅️ INWARD BILL (PURCHASE & DIRECT COSTS)
                       </span>
                       <span className="text-[10px] text-amber-800 font-semibold">
-                        Mill Inward Bill (-2% CD) + Lorry Freight + APMC + TCS + Bags + Brokerage
+                        Mill Inward Bill (-{truck?.purchase_cd_pct !== null && truck?.purchase_cd_pct !== undefined ? truck.purchase_cd_pct : 2}% CD) + Lorry Freight + APMC + TCS + Bags + Brokerage
                       </span>
                     </div>
                     <span className="text-[10px] font-black bg-amber-200 text-amber-900 px-2 py-0.5 rounded uppercase">
@@ -843,14 +882,23 @@ export default function SettlementTab({ selectedTruckId }) {
                         <span>• Mill Purchase Gross:</span>
                         <span className="font-bold table-number text-slate-800">₹{Number(truck?.purchase_amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
                       </div>
-                      <div className="flex justify-between text-emerald-700 font-semibold text-[11px]">
-                        <span>• Less: 2% Cash Discount (CD Benefit):</span>
-                        <span className="font-bold table-number">-₹{Number(Number(truck?.purchase_amount || 0) * 0.02).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
-                      </div>
-                      <div className="flex justify-between pt-1 border-t border-amber-100 font-black text-slate-900">
-                        <span>Net Paid to Mill:</span>
-                        <span className="text-emerald-900 table-number">₹{Number(metrics.purchasePaid || Number(truck?.purchase_amount || 0) * 0.98).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
-                      </div>
+                      {(() => {
+                        const cdPct = truck?.purchase_cd_pct !== null && truck?.purchase_cd_pct !== undefined ? Number(truck.purchase_cd_pct) : 2.0;
+                        const cdAmt = Math.round((Number(truck?.purchase_amount || 0) * (cdPct / 100)) * 100) / 100;
+                        const netPurchase = Math.round((Number(truck?.purchase_amount || 0) - cdAmt) * 100) / 100;
+                        return (
+                          <>
+                            <div className="flex justify-between text-emerald-700 font-semibold text-[11px]">
+                              <span>• Less: {cdPct}% Cash Discount (CD Benefit):</span>
+                              <span className="font-bold table-number">-₹{cdAmt.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+                            </div>
+                            <div className="flex justify-between pt-1 border-t border-amber-100 font-black text-slate-900">
+                              <span>Net Paid to Mill:</span>
+                              <span className="text-emerald-900 table-number">₹{Number(metrics.purchasePaid || netPurchase).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
 
                     {/* Explicit Lorry Expenses Section (LF and LF Advance) */}

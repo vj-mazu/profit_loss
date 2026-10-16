@@ -8,19 +8,22 @@ import {
   Trash2, 
   Edit, 
   ChevronLeft, 
-  ChevronRight,
-  Calculator,
-  Search,
-  Filter,
-  Calendar
+  ChevronRight, 
+  Calculator, 
+  Search, 
+  Filter, 
+  Calendar,
+  Truck
 } from 'lucide-react';
 import api from '../services/api';
 import FilterBar from './FilterBar';
 import Modal from './Modal';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 import { exportSalesPdf } from '../utils/pdfExport';
 
 export default function SalesTab({ selectedTruckId }) {
+  const toast = useToast();
   const { isAdmin } = useAuth();
   const [sales, setSales] = useState([]);
   const [trucks, setTrucks] = useState([]);
@@ -31,6 +34,16 @@ export default function SalesTab({ selectedTruckId }) {
   const [filterDate, setFilterDate] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSaleId, setEditingSaleId] = useState(null);
+  const [expandedSaleIds, setExpandedSaleIds] = useState(new Set());
+
+  const toggleExpandSale = (id) => {
+    setExpandedSaleIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // High-Scale Cursor Pagination state
   const [limit, setLimit] = useState(50);
@@ -61,6 +74,8 @@ export default function SalesTab({ selectedTruckId }) {
     brand_breakdown: {},
     actual_rate: '',
     billing_rate: '',
+    lf_rate: '',
+    lorry_advance: '',
     received_amount: '',
     disc_pct: '5',
     discount_amount: '',
@@ -69,6 +84,7 @@ export default function SalesTab({ selectedTruckId }) {
     payment_mode: 'RTGS/NEFT',
     payment_ref: '',
     payment_status: 'PENDING PAYMENT',
+    payments: [],
   });
 
   const loadData = async (targetCursor = cursor) => {
@@ -164,6 +180,8 @@ export default function SalesTab({ selectedTruckId }) {
       brand_breakdown: {},
       actual_rate: '',
       billing_rate: '',
+      lf_rate: defaultTruck && defaultTruck.truck_lf ? String(defaultTruck.truck_lf) : '',
+      lorry_advance: '',
       received_amount: '',
       disc_pct: '5',
       discount_amount: '',
@@ -172,6 +190,7 @@ export default function SalesTab({ selectedTruckId }) {
       payment_mode: 'RTGS/NEFT',
       payment_ref: '',
       payment_status: 'PENDING PAYMENT',
+      payments: [],
     });
     setIsModalOpen(true);
   };
@@ -191,6 +210,30 @@ export default function SalesTab({ selectedTruckId }) {
       }
     }
 
+    let initialPayments = [];
+    if (sale.payments) {
+      if (typeof sale.payments === 'string') {
+        try { initialPayments = JSON.parse(sale.payments); } catch (e) { initialPayments = []; }
+      } else if (Array.isArray(sale.payments)) {
+        initialPayments = [...sale.payments];
+      }
+    } else if (sale.received_amount && Number(sale.received_amount) > 0) {
+      initialPayments = [{
+        amount: String(sale.received_amount),
+        date: sale.sale_received_date ? new Date(sale.sale_received_date).toISOString().split('T')[0] : '',
+        mode: sale.payment_mode || 'RTGS/NEFT',
+        ref: sale.payment_ref || '',
+      }];
+    }
+
+    const linkedTruck = trucks.find((t) => Number(t.id) === Number(sale.truck_id));
+    const initLfRate = sale.lf_rate !== undefined && sale.lf_rate !== null && sale.lf_rate !== ''
+      ? String(sale.lf_rate)
+      : (linkedTruck?.truck_lf ? String(linkedTruck.truck_lf) : '');
+    const initLorryAdv = sale.lorry_advance !== undefined && sale.lorry_advance !== null && sale.lorry_advance !== ''
+      ? String(sale.lorry_advance)
+      : '';
+
     setFormData({
       truck_id: sale.truck_id || '',
       sale_bill_no: sale.sale_bill_no || '',
@@ -201,6 +244,8 @@ export default function SalesTab({ selectedTruckId }) {
       brand_breakdown: initialBreakdown,
       actual_rate: sale.actual_rate || '',
       billing_rate: sale.billing_rate || '',
+      lf_rate: initLfRate,
+      lorry_advance: initLorryAdv,
       received_amount: sale.received_amount || '',
       disc_pct: discPctVal,
       discount_amount: sale.discount_amount !== undefined && sale.discount_amount !== null ? String(sale.discount_amount) : '',
@@ -209,6 +254,7 @@ export default function SalesTab({ selectedTruckId }) {
       payment_mode: sale.payment_mode || 'RTGS/NEFT',
       payment_ref: sale.payment_ref || '',
       payment_status: sale.payment_status || 'PENDING PAYMENT',
+      payments: initialPayments,
     });
     setIsModalOpen(true);
   };
@@ -231,7 +277,18 @@ export default function SalesTab({ selectedTruckId }) {
       const updated = { ...prev, ...overrides };
       const currentTruck = trucks.find((t) => Number(t.id) === Number(updated.truck_id));
       const kg = currentTruck?.kg_per_bag ? Number(currentTruck.kg_per_bag) : 30;
-      const lf = currentTruck ? Number(currentTruck.truck_lf || 0) : 0;
+
+      // If truck changed and lf_rate was empty, default to truck's lf
+      if (overrides.truck_id !== undefined && (updated.lf_rate === '' || updated.lf_rate === null || updated.lf_rate === undefined)) {
+        if (currentTruck && currentTruck.truck_lf) {
+          updated.lf_rate = String(currentTruck.truck_lf);
+        }
+      }
+
+      const lfRate = updated.lf_rate !== '' && updated.lf_rate !== null && updated.lf_rate !== undefined
+        ? Number(updated.lf_rate)
+        : (currentTruck ? Number(currentTruck.truck_lf || 0) : 0);
+      const lorryAdv = Number(updated.lorry_advance) || 0;
 
       // Qty: if bags changed or overriding bags, recompute qty_qtls
       let qtls = updated.qty_qtls !== '' && updated.qty_qtls !== null && updated.qty_qtls !== undefined 
@@ -264,10 +321,16 @@ export default function SalesTab({ selectedTruckId }) {
       updated.discount_amount = discountAmount;
 
       // Cutting Amount & Payment Status
+      // Buyer pays driver the balance LF (Total LF - LF Advance).
+      // If seller paid advance, buyer only pays balance to driver and pays the advance extra to seller.
+      const totalLF = Math.round(lfRate * qtls * 100) / 100;
+      const lorryBal = Math.max(0, Math.round((totalLF - lorryAdv) * 100) / 100);
       const rec = Number(updated.received_amount) || 0;
       const discVal = Number(discountAmount) || 0;
       const actualRate = Number(updated.actual_rate) || 0;
-      const actualAmt = Math.round((actualRate - lf) * qtls * 100) / 100;
+      const actualAmt = Math.round(((actualRate * qtls) - lorryBal) * 100) / 100;
+
+      const netBill = Math.max(0, Math.round((gross - lorryBal) * 100) / 100);
 
       if (rec > 0) {
         if (overrides.cutting_amount === undefined) {
@@ -275,7 +338,11 @@ export default function SalesTab({ selectedTruckId }) {
           updated.cutting_amount = String(compCutting);
         }
         if (overrides.payment_status === undefined) {
-          updated.payment_status = 'PAID';
+          if (rec + discVal + (Number(updated.cutting_amount) || 0) >= netBill - 5) {
+            updated.payment_status = (Number(updated.cutting_amount) || 0) !== 0 ? 'CUTTING' : 'PAID';
+          } else {
+            updated.payment_status = 'PARTIAL PAYMENT';
+          }
         }
       } else {
         // If payment has not been received yet, Cutting is 0 or empty (not a negative number!)
@@ -294,7 +361,10 @@ export default function SalesTab({ selectedTruckId }) {
   const handleAutoCalculateCutting = () => {
     const currentTruck = trucks.find((t) => Number(t.id) === Number(formData.truck_id));
     const kg = currentTruck?.kg_per_bag ? Number(currentTruck.kg_per_bag) : 30;
-    const lf = currentTruck ? Number(currentTruck.truck_lf || 0) : 0;
+    const lfRate = formData.lf_rate !== '' && formData.lf_rate !== null && formData.lf_rate !== undefined
+      ? Number(formData.lf_rate)
+      : (currentTruck ? Number(currentTruck.truck_lf || 0) : 0);
+    const lorryAdv = Number(formData.lorry_advance) || 0;
     const qtls = Number(formData.qty_qtls) || ((Number(formData.bags) || 0) * kg / 100);
     const rec = Number(formData.received_amount) || 0;
     if (rec <= 0) {
@@ -305,15 +375,95 @@ export default function SalesTab({ selectedTruckId }) {
     const discPct = Number(formData.disc_pct) || 5;
     const gross = qtls * billingRate;
     const disc = gross > 0 ? Math.round(gross * (discPct / 100) * 100) / 100 : (Number(formData.discount_amount) || 0);
+    const totalLF = Math.round(lfRate * qtls * 100) / 100;
+    const lorryBal = Math.max(0, Math.round((totalLF - lorryAdv) * 100) / 100);
     const actualRate = Number(formData.actual_rate) || 0;
-    const actualAmt = Math.round((actualRate - lf) * qtls * 100) / 100;
+    const actualAmt = Math.round(((actualRate * qtls) - lorryBal) * 100) / 100;
     const cutting = Math.round((actualAmt - rec - disc) * 100) / 100;
     setFormData((prev) => ({
       ...prev,
       discount_amount: String(disc),
       cutting_amount: String(cutting),
-      payment_status: 'PAID',
+      payment_status: rec + disc + cutting >= (gross - lorryBal) - 5 ? 'PAID' : 'PARTIAL PAYMENT',
     }));
+  };
+
+  const syncPaymentsToForm = (newPayments) => {
+    const totalRec = newPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+    const latestDate = newPayments.length > 0 ? (newPayments[newPayments.length - 1].date || '') : '';
+    const latestMode = newPayments.length > 0 ? (newPayments[newPayments.length - 1].mode || 'RTGS/NEFT') : 'RTGS/NEFT';
+    const latestRef = newPayments.length > 0 ? (newPayments[newPayments.length - 1].ref || '') : '';
+
+    updateFinancialFields({
+      received_amount: totalRec > 0 ? String(totalRec) : '',
+      sale_received_date: latestDate,
+      payment_mode: latestMode,
+      payment_ref: latestRef,
+      payments: newPayments,
+    });
+  };
+
+  const handleAddPaymentTranche = () => {
+    const currentList = formData.payments || [];
+    const alreadyRec = currentList.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const netBill = calcNetBillAmount;
+    const remaining = Math.max(0, netBill - alreadyRec);
+    const newEntry = {
+      amount: remaining > 0 ? String(Math.round(remaining)) : '',
+      date: new Date().toISOString().split('T')[0],
+      mode: 'RTGS/NEFT',
+      ref: '',
+    };
+    const updated = [...currentList, newEntry];
+    syncPaymentsToForm(updated);
+  };
+
+  const handleUpdatePaymentTranche = (index, field, value) => {
+    const updated = [...(formData.payments || [])];
+    updated[index] = { ...updated[index], [field]: value };
+    syncPaymentsToForm(updated);
+  };
+
+  const handleRemovePaymentTranche = (index) => {
+    const updated = (formData.payments || []).filter((_, i) => i !== index);
+    syncPaymentsToForm(updated);
+  };
+
+  const handleConvertToInstallments = () => {
+    const currentRec = formData.received_amount;
+    const netBill = calcNetBillAmount;
+    const defaultFirstAmt = currentRec && Number(currentRec) > 0 ? currentRec : (netBill > 0 ? String(Math.round(netBill / 2)) : '');
+    const firstPayment = {
+      amount: defaultFirstAmt,
+      date: formData.sale_received_date || new Date().toISOString().split('T')[0],
+      mode: formData.payment_mode || 'RTGS/NEFT',
+      ref: formData.payment_ref || '',
+    };
+    const remaining = Math.max(0, netBill - (Number(defaultFirstAmt) || 0));
+    const secondPayment = {
+      amount: remaining > 0 ? String(Math.round(remaining)) : '',
+      date: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+      mode: 'RTGS/NEFT',
+      ref: '',
+    };
+    const initialList = [firstPayment, secondPayment];
+    syncPaymentsToForm(initialList);
+  };
+
+  const computeTrancheInterest = (p) => {
+    const truckBasePaymentDate = activeTruck?.purchase_payment_date || activeTruck?.unloading_date || activeTruck?.date;
+    if (!p.amount || Number(p.amount) <= 0 || !p.date || !truckBasePaymentDate) {
+      return { days: 0, interest: 0, type: 'NONE' };
+    }
+    const dSale = new Date(p.date);
+    const dPurchase = new Date(truckBasePaymentDate);
+    const diffDays = Math.round((dSale.getTime() - dPurchase.getTime()) / (1000 * 60 * 60 * 24));
+    const interest = Math.round(((Number(p.amount) * 0.12 * Math.abs(diffDays)) / 365) * 100) / 100;
+    return {
+      days: diffDays,
+      interest,
+      type: diffDays > 0 ? 'LOSS' : diffDays < 0 ? 'EARNED' : 'NEUTRAL',
+    };
   };
 
   // Calculate color inventory and available balance for the selected truck
@@ -405,7 +555,7 @@ export default function SalesTab({ selectedTruckId }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!formData.truck_id) {
-      alert('Please select an inward truck for this sales bill');
+      toast.warning('Please select an inward truck for this sales bill');
       return;
     }
 
@@ -414,7 +564,7 @@ export default function SalesTab({ selectedTruckId }) {
     for (const item of inventory) {
       const sellCount = Number(formData.brand_breakdown?.[item.colorName]) || 0;
       if (item.inward > 0 && sellCount > item.available) {
-        alert(`Validation Error: Cannot sell ${sellCount.toLocaleString('en-IN')} bags of ${item.colorName}. Only ${item.available.toLocaleString('en-IN')} ${item.colorName} bags available in this truck dispatch!`);
+        toast.warning(`Validation Error: Cannot sell ${sellCount.toLocaleString('en-IN')} bags of ${item.colorName}. Only ${item.available.toLocaleString('en-IN')} ${item.colorName} bags available in this truck dispatch!`);
         return;
       }
     }
@@ -428,7 +578,7 @@ export default function SalesTab({ selectedTruckId }) {
       const totalAvailableOnTruck = Math.max(0, (Number(currentTruck.bags) || 0) - otherSoldTotal);
       const requestedTotal = Number(formData.bags) || 0;
       if (requestedTotal > totalAvailableOnTruck) {
-        alert(`Validation Error: Cannot sell ${requestedTotal.toLocaleString('en-IN')} bags. Only ${totalAvailableOnTruck.toLocaleString('en-IN')} total bags remaining on Truck ${currentTruck.truck_serial || currentTruck.truck_number}!`);
+        toast.warning(`Validation Error: Cannot sell ${requestedTotal.toLocaleString('en-IN')} bags. Only ${totalAvailableOnTruck.toLocaleString('en-IN')} total bags remaining on Truck ${currentTruck.truck_serial || currentTruck.truck_number}!`);
         return;
       }
     }
@@ -442,6 +592,8 @@ export default function SalesTab({ selectedTruckId }) {
         qty_qtls: Number(formData.qty_qtls) || (Number(formData.bags) * 30 / 100),
         actual_rate: Number(formData.actual_rate) || 0,
         billing_rate: Number(formData.billing_rate) || 0,
+        lf_rate: formData.lf_rate !== '' && formData.lf_rate !== null ? Number(formData.lf_rate) : null,
+        lorry_advance: formData.lorry_advance !== '' && formData.lorry_advance !== null ? Number(formData.lorry_advance) : 0,
         received_amount: formData.received_amount ? Number(formData.received_amount) : null,
         disc_pct: formData.disc_pct !== '' && formData.disc_pct !== null ? (Number(formData.disc_pct) > 1 ? Number(formData.disc_pct) / 100 : Number(formData.disc_pct)) : 0.05,
         discount_amount: formData.discount_amount !== '' && formData.discount_amount !== null ? Number(formData.discount_amount) : null,
@@ -450,17 +602,20 @@ export default function SalesTab({ selectedTruckId }) {
         payment_mode: formData.payment_mode || null,
         payment_ref: formData.payment_ref || null,
         brand_breakdown: formData.brand_breakdown || {},
+        payments: formData.payments && formData.payments.length > 0 ? formData.payments : [],
       };
 
       if (editingSaleId) {
         await api.updateSale(editingSaleId, payload);
+        toast.success('Sales bill updated successfully');
       } else {
         await api.createSale(payload);
+        toast.success('Sales bill created successfully');
       }
       setIsModalOpen(false);
       loadData(cursor);
     } catch (err) {
-      alert(err.response?.data?.message || (editingSaleId ? 'Failed to update sales bill' : 'Failed to save sales bill'));
+      toast.error(err.response?.data?.message || (editingSaleId ? 'Failed to update sales bill' : 'Failed to save sales bill'));
     }
   };
 
@@ -468,15 +623,17 @@ export default function SalesTab({ selectedTruckId }) {
     if (window.confirm(`Are you sure you want to delete sales bill ${sale.sale_bill_no} for ${sale.party_name}?`)) {
       try {
         await api.deleteSale(sale.id);
+        toast.success(`Sales bill ${sale.sale_bill_no} deleted successfully`);
         loadData(cursor);
       } catch (err) {
-        alert(err.response?.data?.message || 'Failed to delete sales bill');
+        toast.error(err.response?.data?.message || 'Failed to delete sales bill');
       }
     }
   };
 
   const statusOptions = [
     { value: 'PAID', label: 'Paid in Full' },
+    { value: 'PARTIAL PAYMENT', label: 'Partial Payment' },
     { value: 'PENDING PAYMENT', label: 'Pending Payment' },
     { value: 'CUTTING', label: 'Cutting Deducted' },
   ];
@@ -487,12 +644,16 @@ export default function SalesTab({ selectedTruckId }) {
   const calcQtls = Number(formData.qty_qtls) || (calcBags * 30 / 100);
   const calcBillingRate = Number(formData.billing_rate) || 0;
   const calcActualRate = Number(formData.actual_rate) || 0;
-  const calcLF = activeTruck ? Number(activeTruck.truck_lf || 0) : 0;
+  const calcLF = formData.lf_rate !== '' && formData.lf_rate !== null && formData.lf_rate !== undefined
+    ? Number(formData.lf_rate)
+    : (activeTruck ? Number(activeTruck.truck_lf || 0) : 0);
+  const calcLorryAdvance = Number(formData.lorry_advance) || 0;
   const calcGrossBillingAmount = calcQtls * calcBillingRate;
   const calcGrossActualAmount = calcQtls * calcActualRate;
   const calcLorryAmount = calcQtls * calcLF;
-  const calcNetBillAmount = (calcBillingRate - calcLF) * calcQtls;
-  const calcNetActualAmount = (calcActualRate - calcLF) * calcQtls;
+  const calcLorryBalance = Math.max(0, calcLorryAmount - calcLorryAdvance);
+  const calcNetBillAmount = calcGrossBillingAmount - calcLorryBalance;
+  const calcNetActualAmount = calcGrossActualAmount - calcLorryBalance;
   const calcBrokerageRate = formData.brokerage_per_qtl !== '' && formData.brokerage_per_qtl !== null ? Number(formData.brokerage_per_qtl) : null;
   const calcTotalBrokerage = calcBrokerageRate !== null ? (calcQtls * calcBrokerageRate) : null;
 
@@ -527,6 +688,22 @@ export default function SalesTab({ selectedTruckId }) {
     };
   })();
 
+  // Top KPI metrics for wholesale sales
+  const totalSalesBilled = sales.reduce((a, s) => a + (Number(s.bill_amount) || 0), 0);
+  const totalReceived = sales.reduce((a, s) => a + (Number(s.received_amount) || 0), 0);
+  const totalSalesLorryAmount = sales.reduce((a, s) => a + (Number(s.lorry_amount) || 0), 0);
+  const totalSalesLorryAdvance = sales.reduce((a, s) => a + (Number(s.lorry_advance) || 0), 0);
+  const totalSalesLorryBalance = sales.reduce((a, s) => a + Math.max(0, (Number(s.lorry_amount || 0) - Number(s.lorry_advance || 0))), 0);
+  const totalEstimatedProfit = sales.reduce((sum, s) => {
+    const r = Number(s.billing_rate || s.actual_rate || 0);
+    const be = Number(s.breakeven_rate || 0);
+    const q = Number(s.qty_qtls || 0);
+    return be > 0 ? sum + Math.round((r - be) * q) : sum;
+  }, 0);
+  const totalQtlsWithBe = sales.reduce((sum, s) => (Number(s.breakeven_rate || 0) > 0 ? sum + (Number(s.qty_qtls) || 0) : sum), 0);
+  const avgProfitPerQtl = totalQtlsWithBe > 0 ? (totalEstimatedProfit / totalQtlsWithBe) : 0;
+  const isOverallProfit = totalEstimatedProfit >= 0;
+
   return (
     <div className="space-y-6">
       {/* Section Header with Stats & New Bill Button */}
@@ -551,6 +728,57 @@ export default function SalesTab({ selectedTruckId }) {
           <Plus className="w-4 h-4" />
           <span>+ New Sales Bill</span>
         </button>
+      </div>
+
+      {/* 4 Primary Wholesale Sales KPI Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
+        <div className="bg-white p-3.5 rounded-xl border border-slate-200 border-l-4 border-l-blue-600 shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase block">Total Sales Billed</span>
+          <div className="text-lg font-black text-blue-950 mt-1 table-number">
+            ₹{totalSalesBilled.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+          </div>
+          <span className="text-[10px] text-slate-400 font-semibold">{sales.length} wholesale bills</span>
+        </div>
+
+        <div className="bg-white p-3.5 rounded-xl border border-slate-200 border-l-4 border-l-emerald-600 shadow-2xs">
+          <span className="text-[10px] font-bold text-slate-500 uppercase block">Bank Inflow Received</span>
+          <div className="text-lg font-black text-emerald-950 mt-1 table-number">
+            ₹{totalReceived.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+          </div>
+          <span className="text-[10px] text-slate-500 font-semibold">
+            {totalSalesBilled > totalReceived ? `Pending: ₹${(totalSalesBilled - totalReceived).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : 'Fully Collected ✓'}
+          </span>
+        </div>
+
+        <div className="bg-white p-3.5 rounded-xl border border-slate-200 border-l-4 border-l-sky-500 shadow-2xs">
+          <div className="flex justify-between items-center">
+            <span className="text-[10px] font-bold text-sky-900 uppercase block">Delivery LF & Driver Advance</span>
+            <span className="text-[9px] font-bold bg-sky-100 text-sky-800 px-1 py-0.2 rounded">Outward</span>
+          </div>
+          <div className="text-lg font-black text-sky-950 mt-1 table-number">
+            ₹{totalSalesLorryAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+          </div>
+          <div className="flex items-center space-x-1.5 text-[10px] text-slate-600 mt-0.5">
+            <span className="font-bold text-amber-800">Adv: ₹{totalSalesLorryAdvance.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+            <span>•</span>
+            <span className="font-bold text-sky-800">Buyer: ₹{totalSalesLorryBalance.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+          </div>
+        </div>
+
+        <div className={`bg-white p-3.5 rounded-xl border border-slate-200 border-l-4 shadow-2xs ${isOverallProfit ? 'border-l-emerald-600' : 'border-l-rose-600'}`}>
+          <div className="flex justify-between items-center">
+            <span className="text-[10px] font-bold text-slate-500 uppercase block">Net Sales Profit / Loss</span>
+            <span className={`text-[9px] font-black px-1.5 py-0.2 rounded ${isOverallProfit ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+              {isOverallProfit ? 'PROFIT' : 'LOSS'}
+            </span>
+          </div>
+          <div className={`text-lg font-black mt-1 table-number ${isOverallProfit ? 'text-emerald-700' : 'text-rose-700'}`}>
+            {isOverallProfit ? `+₹${totalEstimatedProfit.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : `-₹${Math.abs(totalEstimatedProfit).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
+          </div>
+          <span className={`text-[10px] font-bold ${isOverallProfit ? 'text-emerald-600' : 'text-rose-600'}`}>
+            Avg {isOverallProfit ? '+' : '-'}₹{Math.abs(avgProfitPerQtl).toFixed(2)} / Quintal
+          </span>
+        </div>
       </div>
 
       {/* Filter Bar with Truck Dropdown */}
@@ -634,6 +862,7 @@ export default function SalesTab({ selectedTruckId }) {
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Lorry Ded. (₹)</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Brokerage (₹)</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Breakeven Rate</th>
+                <th className="py-2.5 px-3 border-r border-blue-400/40 text-right bg-emerald-800/80">Profit / Loss (₹)</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Received (₹)</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-left">Payment Date & Mode</th>
                 <th className="py-2.5 px-3 border-r border-blue-400/40 text-right">Cash Disc. (₹)</th>
@@ -645,7 +874,7 @@ export default function SalesTab({ selectedTruckId }) {
             <tbody className="divide-y divide-slate-200 font-medium text-slate-800">
               {loading ? (
                 <tr>
-                  <td colSpan="17" className="py-12 text-center text-slate-400 border border-slate-300">
+                  <td colSpan="18" className="py-12 text-center text-slate-400 border border-slate-300">
                     <div className="flex items-center justify-center space-x-2">
                       <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
                       <span>Loading wholesale sales bills...</span>
@@ -654,7 +883,7 @@ export default function SalesTab({ selectedTruckId }) {
                 </tr>
               ) : sales.length === 0 ? (
                 <tr>
-                  <td colSpan="17" className="py-16 text-center border border-slate-300">
+                  <td colSpan="18" className="py-16 text-center border border-slate-300">
                     <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3">
                       <Receipt className="w-6 h-6" />
                     </div>
@@ -674,138 +903,385 @@ export default function SalesTab({ selectedTruckId }) {
               ) : (
                 sales.map((s, idx) => {
                   const rowBg = idx % 4 < 2 ? 'bg-[#edfdf1] hover:bg-[#dcfce7]' : 'bg-[#f7f2fb] hover:bg-[#ede5f7]';
+                  const isExpanded = expandedSaleIds.has(s.id);
+                  let pList = [];
+                  if (s.payments) {
+                    try { pList = typeof s.payments === 'string' ? JSON.parse(s.payments) : s.payments; } catch (e) { pList = []; }
+                  }
+                  if (!Array.isArray(pList)) pList = [];
+                  if (pList.length === 0 && s.received_amount && Number(s.received_amount) > 0) {
+                    pList = [{
+                      amount: Number(s.received_amount),
+                      date: s.sale_received_date,
+                      mode: s.payment_mode || 'RTGS/NEFT',
+                      ref: s.payment_ref,
+                      interest_days: s.interest_days,
+                      interest_amount: s.interest_amount,
+                      interest_type: s.interest_type,
+                    }];
+                  }
+
+                  const hasMultiple = pList.length > 1;
+                  const totalPendingBal = Math.max(0, Math.round(Number(s.bill_amount || 0) - Number(s.received_amount || 0) - Number(s.discount_amount || 0) - Number(s.cutting_amount || 0)));
+
                   return (
-                    <tr key={s.id} className={`${rowBg} transition-colors`}>
-                      <td className="py-2.5 px-3 font-bold text-slate-900 whitespace-nowrap border-r border-b border-slate-300">
-                        <span className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-900 font-mono font-bold">
-                          {s.sale_bill_no}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-800 whitespace-nowrap font-medium border-r border-b border-slate-300">
-                        {s.truck_serial} <span className="text-slate-500 font-mono text-[11px]">({s.truck_number})</span>
-                      </td>
-                      <td className="py-2.5 px-3 font-bold text-slate-900 max-w-[170px] truncate border-r border-b border-slate-300" title={s.party_name}>
-                        {s.party_name}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-bold text-slate-900 border-r border-b border-slate-300">
-                        <div>{Number(s.bags).toLocaleString('en-IN')}</div>
-                        {(() => {
-                          let bd = s.brand_breakdown;
-                          if (typeof bd === 'string') {
-                            try { bd = JSON.parse(bd); } catch (e) { bd = null; }
-                          }
-                          if (bd && typeof bd === 'object' && Object.keys(bd).length > 0) {
-                            const activeColors = Object.entries(bd).filter(([_, c]) => Number(c) > 0);
-                            if (activeColors.length > 0) {
-                              return (
-                                <div className="flex flex-wrap gap-1 justify-end mt-0.5">
-                                  {activeColors.map(([col, count]) => (
-                                    <span key={col} className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-900 border border-blue-200">
-                                      {col}: {count}
-                                    </span>
-                                  ))}
-                                </div>
-                              );
+                    <React.Fragment key={s.id}>
+                      <tr className={`${rowBg} transition-colors`}>
+                        <td className="py-2.5 px-3 font-bold text-slate-900 whitespace-nowrap border-r border-b border-slate-300">
+                          <span className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-900 font-mono font-bold">
+                            {s.sale_bill_no}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-800 whitespace-nowrap font-medium border-r border-b border-slate-300">
+                          {s.truck_serial} <span className="text-slate-500 font-mono text-[11px]">({s.truck_number})</span>
+                        </td>
+                        <td className="py-2.5 px-3 font-bold text-slate-900 max-w-[170px] truncate border-r border-b border-slate-300" title={s.party_name}>
+                          {s.party_name}
+                        </td>
+                        <td className="py-2.5 px-3 text-right table-number font-bold text-slate-900 border-r border-b border-slate-300">
+                          <div>{Number(s.bags).toLocaleString('en-IN')}</div>
+                          {(() => {
+                            let bd = s.brand_breakdown;
+                            if (typeof bd === 'string') {
+                              try { bd = JSON.parse(bd); } catch (e) { bd = null; }
                             }
-                          }
-                          return null;
-                        })()}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-bold text-slate-900 border-r border-b border-slate-300">{Number(s.qty_qtls).toFixed(1)}</td>
-                      <td className="py-2.5 px-3 text-right table-number font-medium border-r border-b border-slate-300">₹{Number(s.actual_rate).toLocaleString('en-IN')}</td>
-                      <td className="py-2.5 px-3 text-right table-number font-extrabold text-slate-900 border-r border-b border-slate-300">₹{Number(s.billing_rate).toLocaleString('en-IN')}</td>
-                      <td className="py-2.5 px-3 text-right table-number font-extrabold text-slate-900 border-r border-b border-slate-300">
-                        ₹{Number(s.bill_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-extrabold text-rose-700 border-r border-b border-slate-300">
-                        -₹{Number(s.lorry_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-bold text-purple-900 border-r border-b border-slate-300">
-                        {s.brokerage_amount !== null && s.brokerage_amount !== undefined ? (
-                          <span title={`₹${s.brokerage_per_qtl || 0}/Qtl`}>
-                            ₹{Number(s.brokerage_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                            <span className="text-[10px] text-purple-600 block font-normal">(@₹{s.brokerage_per_qtl}/Q)</span>
-                          </span>
-                        ) : (
-                          <span className="text-slate-400 text-[10px]">Auto</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-bold text-blue-900 border-r border-b border-slate-300">
-                        ₹{Number(s.breakeven_rate).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-bold text-emerald-800 border-r border-b border-slate-300">
-                        {s.received_amount ? `₹${Number(s.received_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '-'}
-                      </td>
-                      <td className="py-2.5 px-3 text-left border-r border-b border-slate-300 whitespace-nowrap">
-                        {s.sale_received_date ? (
-                          <div>
-                            <span className="font-bold text-slate-900 block text-xs">
-                              {new Date(s.sale_received_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            if (bd && typeof bd === 'object' && Object.keys(bd).length > 0) {
+                              const activeColors = Object.entries(bd).filter(([_, c]) => Number(c) > 0);
+                              if (activeColors.length > 0) {
+                                return (
+                                  <div className="flex flex-wrap gap-1 justify-end mt-0.5">
+                                    {activeColors.map(([col, count]) => (
+                                      <span key={col} className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-900 border border-blue-200">
+                                        {col}: {count}
+                                      </span>
+                                    ))}
+                                  </div>
+                                );
+                              }
+                            }
+                            return null;
+                          })()}
+                        </td>
+                        <td className="py-2.5 px-3 text-right table-number font-bold text-slate-900 border-r border-b border-slate-300">{Number(s.qty_qtls).toFixed(1)}</td>
+                        <td className="py-2.5 px-3 text-right table-number font-medium border-r border-b border-slate-300">₹{Number(s.actual_rate).toLocaleString('en-IN')}</td>
+                        <td className="py-2.5 px-3 text-right table-number font-extrabold text-slate-900 border-r border-b border-slate-300">₹{Number(s.billing_rate).toLocaleString('en-IN')}</td>
+                        <td className="py-2.5 px-3 text-right table-number font-extrabold text-slate-900 border-r border-b border-slate-300">
+                          ₹{Number(s.bill_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                        </td>
+                        <td className="py-2.5 px-3 text-right table-number font-extrabold text-rose-700 border-r border-b border-slate-300">
+                          {(() => {
+                            const tot = Number(s.lorry_amount || 0);
+                            const adv = Number(s.lorry_advance || 0);
+                            const bal = Math.max(0, tot - adv);
+                            return (
+                              <div>
+                                <span>-₹{bal.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                                <div className="flex flex-col items-end text-[10px] font-medium text-slate-500">
+                                  {s.lf_rate ? <span>@₹{s.lf_rate}/Q (Tot: ₹{tot.toLocaleString('en-IN')})</span> : null}
+                                  {adv > 0 && (
+                                    <span className="font-bold text-amber-800">
+                                      Adv: ₹{adv.toLocaleString('en-IN')}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </td>
+                        <td className="py-2.5 px-3 text-right table-number font-bold text-purple-900 border-r border-b border-slate-300">
+                          {s.brokerage_amount !== null && s.brokerage_amount !== undefined ? (
+                            <span title={`₹${s.brokerage_per_qtl || 0}/Qtl`}>
+                              ₹{Number(s.brokerage_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                              <span className="text-[10px] text-purple-600 block font-normal">(@₹{s.brokerage_per_qtl}/Q)</span>
                             </span>
-                            <span className="text-[10px] text-slate-500 font-semibold block">
-                              {s.payment_mode || 'RTGS/NEFT'}{s.payment_ref ? ` • ${s.payment_ref}` : ''}
+                          ) : (
+                            <span className="text-slate-400 text-[10px]">Auto</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-right table-number font-bold text-blue-900 border-r border-b border-slate-300">
+                          ₹{Number(s.breakeven_rate).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        
+                        {/* Profit / Loss per bill */}
+                        <td className="py-2.5 px-3 text-right table-number border-r border-b border-slate-300 bg-emerald-50/20">
+                          {(() => {
+                            const rate = Number(s.billing_rate || s.actual_rate || 0);
+                            const be = Number(s.breakeven_rate || 0);
+                            const q = Number(s.qty_qtls || 0);
+                            if (be <= 0) return <span className="text-slate-400 font-normal">-</span>;
+                            const diff = rate - be;
+                            const profit = Math.round(diff * q);
+                            const isPos = profit >= 0;
+                            return (
+                              <div>
+                                <span className={`font-black ${isPos ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                  {isPos ? `+₹${profit.toLocaleString('en-IN')}` : `-₹${Math.abs(profit).toLocaleString('en-IN')}`}
+                                </span>
+                                <span className={`block text-[9px] font-semibold ${isPos ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                  {isPos ? `+₹${diff.toFixed(1)}/Q` : `-₹${Math.abs(diff).toFixed(1)}/Q`}
+                                </span>
+                              </div>
+                            );
+                          })()}
+                        </td>
+
+                        {/* Received Amount & Installment Badges */}
+                        <td className="py-2.5 px-3 text-right table-number font-bold text-emerald-800 border-r border-b border-slate-300">
+                          {s.received_amount ? (
+                            <div>
+                              <span>₹{Number(s.received_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                              {pList.length > 0 && (
+                                <div className="mt-1 space-y-0.5">
+                                  {pList.map((p, pIdx) => (
+                                    <div
+                                      key={pIdx}
+                                      className="text-[9px] font-bold text-blue-900 bg-blue-50/90 px-1 py-0.2 rounded border border-blue-200 flex items-center justify-between gap-1"
+                                    >
+                                      <span>P{pIdx + 1}: ₹{Number(p.amount || 0).toLocaleString('en-IN')}</span>
+                                      <span className="text-slate-500 font-normal">
+                                        {p.date ? new Date(p.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : ''}
+                                      </span>
+                                    </div>
+                                  ))}
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleExpandSale(s.id)}
+                                    className="text-[10px] font-extrabold text-blue-700 hover:text-blue-900 underline block text-right mt-1 cursor-pointer"
+                                  >
+                                    {isExpanded ? '▲ Hide Details' : `▼ ${hasMultiple ? `${pList.length} Installments` : 'Float Details'}`}
+                                  </button>
+                                </div>
+                              )}
+                              {s.payment_status === 'PARTIAL PAYMENT' && (
+                                <span className="block text-[9px] text-amber-900 font-extrabold bg-amber-100/90 px-1 py-0.5 rounded border border-amber-300 mt-1">
+                                  Pending: ₹{totalPendingBal.toLocaleString('en-IN')}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-slate-400 italic text-[11px]">-</span>
+                          )}
+                        </td>
+
+                        {/* Payment Date & Mode */}
+                        <td className="py-2.5 px-3 text-left border-r border-b border-slate-300 whitespace-nowrap">
+                          {hasMultiple ? (
+                            <div className="space-y-0.5">
+                              <span className="font-extrabold text-blue-950 block text-xs">
+                                {pList.length} Parts Recorded
+                              </span>
+                              <div className="flex flex-col gap-0.5 text-[10px] text-slate-600">
+                                {pList.map((p, pIdx) => (
+                                  <span key={pIdx}>
+                                    P{pIdx + 1}: {p.date ? new Date(p.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '-'} ({p.mode || 'RTGS'})
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ) : s.sale_received_date ? (
+                            <div>
+                              <span className="font-bold text-slate-900 block text-xs">
+                                {new Date(s.sale_received_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-semibold block">
+                                {s.payment_mode || 'RTGS/NEFT'}{s.payment_ref ? ` • ${s.payment_ref}` : ''}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-slate-400 italic text-[11px]">Pending Date</span>
+                          )}
+                        </td>
+
+                        <td className="py-2.5 px-3 text-right table-number text-slate-600 border-r border-b border-slate-300">
+                          {Number(s.discount_amount) > 0 ? `₹${Number(s.discount_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '-'}
+                        </td>
+                        <td className="py-2.5 px-3 text-right table-number font-semibold border-r border-b border-slate-300">
+                          {Number(s.cutting_amount) !== 0 ? (
+                            <span className={Number(s.cutting_amount) < 0 ? 'text-rose-700 font-bold' : 'text-emerald-700 font-bold'}>
+                              {Number(s.cutting_amount) < 0 ? `-₹${Math.abs(Number(s.cutting_amount))}` : `+₹${Number(s.cutting_amount)}`}
                             </span>
-                          </div>
-                        ) : (
-                          <span className="text-slate-400 italic text-[11px]">Pending Date</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number text-slate-600 border-r border-b border-slate-300">
-                        {Number(s.discount_amount) > 0 ? `₹${Number(s.discount_amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '-'}
-                      </td>
-                      <td className="py-2.5 px-3 text-right table-number font-semibold border-r border-b border-slate-300">
-                        {Number(s.cutting_amount) !== 0 ? (
-                          <span className={Number(s.cutting_amount) < 0 ? 'text-rose-700 font-bold' : 'text-emerald-700 font-bold'}>
-                            {Number(s.cutting_amount) < 0 ? `-₹${Math.abs(Number(s.cutting_amount))}` : `+₹${Number(s.cutting_amount)}`}
+                          ) : '-'}
+                        </td>
+                        <td className="py-2.5 px-3 text-center whitespace-nowrap border-r border-b border-slate-300">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase inline-block text-center leading-tight ${
+                            s.payment_status === 'PAID' ? 'bg-[#dcfce7] text-[#15803d] border border-[#86efac]' :
+                            s.payment_status === 'PARTIAL PAYMENT' ? 'bg-[#fef3c7] text-[#92400e] border border-[#fcd34d]' :
+                            s.payment_status === 'CUTTING' ? 'bg-[#fef9c3] text-[#854d0e] border border-[#fde047]' : 
+                            'bg-[#fee2e2] text-[#991b1b] border border-[#fca5a5]'
+                          }`}>
+                            {s.payment_status === 'PAID' ? 'PAID ✓' : s.payment_status === 'PARTIAL PAYMENT' ? 'PARTIAL ⏳' : s.payment_status}
                           </span>
-                        ) : '-'}
-                      </td>
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap border-r border-b border-slate-300">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase inline-block text-center leading-tight ${
-                          s.payment_status === 'PAID' ? 'bg-[#dcfce7] text-[#15803d] border border-[#86efac]' :
-                          s.payment_status === 'CUTTING' ? 'bg-[#fef9c3] text-[#854d0e] border border-[#fde047]' : 'bg-[#fee2e2] text-[#991b1b] border border-[#fca5a5]'
-                        }`}>
-                          {s.payment_status === 'PAID' ? 'PAID ✓' : s.payment_status}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1 border-b border-slate-300">
-                        <button
-                          onClick={() => handleOpenEditModal(s)}
-                          title="Edit Sales Bill"
-                          className="p-1 rounded bg-white hover:bg-orange-50 text-orange-600 border border-slate-300 shadow-2xs inline-flex items-center cursor-pointer"
-                        >
-                          <Edit className="w-4 h-4" />
-                        </button>
-                        {isAdmin && (
+                        </td>
+                        <td className="py-2.5 px-3 text-right whitespace-nowrap space-x-1 border-b border-slate-300">
                           <button
-                            onClick={() => handleDelete(s)}
-                            title="Delete Sales Bill"
-                            className="p-1 rounded bg-white hover:bg-rose-50 text-rose-600 border border-slate-300 shadow-2xs inline-flex items-center cursor-pointer"
+                            onClick={() => handleOpenEditModal(s)}
+                            title="Edit Sales Bill"
+                            className="p-1 rounded bg-white hover:bg-orange-50 text-orange-600 border border-slate-300 shadow-2xs inline-flex items-center cursor-pointer"
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Edit className="w-4 h-4" />
                           </button>
-                        )}
-                      </td>
-                    </tr>
+                          {isAdmin && (
+                            <button
+                              onClick={() => handleDelete(s)}
+                              title="Delete Sales Bill"
+                              className="p-1 rounded bg-white hover:bg-rose-50 text-rose-600 border border-slate-300 shadow-2xs inline-flex items-center cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+
+                      {/* Expandable Installment Breakdown Accordion Sub-Row */}
+                      {isExpanded && (
+                        <tr key={`expand-${s.id}`} className="bg-gradient-to-r from-blue-50/90 via-emerald-50/60 to-blue-50/90 border-b-2 border-blue-300">
+                          <td colSpan="18" className="p-3">
+                            <div className="bg-white rounded-xl border border-blue-200 shadow-sm p-3.5 space-y-3">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-2">
+                                <div className="flex items-center space-x-2">
+                                  <span className="w-6 h-6 rounded-lg bg-blue-100 text-blue-800 flex items-center justify-center font-black text-xs">
+                                    ₹
+                                  </span>
+                                  <div>
+                                    <span className="font-black text-slate-900 text-xs tracking-tight">
+                                      Installment Payment Ledger · {s.sale_bill_no} ({s.party_name})
+                                    </span>
+                                    <span className="block text-[11px] text-slate-500 font-semibold">
+                                      Truck: {s.truck_serial} ({s.truck_number}) • Base Payment Date: {s.purchase_payment_date ? new Date(s.purchase_payment_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Unloading/Arrival Date'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 text-xs">
+                                  <div className="bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                                    <span className="text-slate-500 font-semibold">Gross Billed: </span>
+                                    <span className="font-black text-slate-900">₹{Number(s.bill_amount).toLocaleString('en-IN')}</span>
+                                  </div>
+                                  <div className="bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                                    <span className="text-emerald-700 font-semibold">Total Received: </span>
+                                    <span className="font-black text-emerald-900">₹{Number(s.received_amount || 0).toLocaleString('en-IN')}</span>
+                                  </div>
+                                  {totalPendingBal > 0 && (
+                                    <div className="bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-300">
+                                      <span className="text-amber-800 font-semibold">Pending Balance: </span>
+                                      <span className="font-black text-amber-950">₹{totalPendingBal.toLocaleString('en-IN')}</span>
+                                    </div>
+                                  )}
+                                  <button
+                                    onClick={() => handleOpenEditModal(s)}
+                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-2xs cursor-pointer ml-1"
+                                  >
+                                    + Add Next Part
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Installments Table */}
+                              <div className="overflow-x-auto rounded-lg border border-slate-200">
+                                <table className="w-full text-left text-xs">
+                                  <thead>
+                                    <tr className="bg-slate-100 text-slate-700 font-extrabold uppercase text-[10px] tracking-wider border-b border-slate-200">
+                                      <th className="py-2 px-3">Part #</th>
+                                      <th className="py-2 px-3 text-right">Amount (₹)</th>
+                                      <th className="py-2 px-3">Received Date</th>
+                                      <th className="py-2 px-3">Payment Mode & Ref</th>
+                                      <th className="py-2 px-3 text-center">Days vs Purchase Date</th>
+                                      <th className="py-2 px-3 text-right">12% Float Interest</th>
+                                      <th className="py-2 px-3 text-center">Interest Type</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100 font-semibold text-slate-800">
+                                    {pList.map((p, pIdx) => {
+                                      const days = p.interest_days !== undefined ? Number(p.interest_days) : (s.interest_days !== undefined ? Number(s.interest_days) : 0);
+                                      const isEarned = p.interest_type === 'EARNED' || days < 0;
+                                      const isLoss = p.interest_type === 'LOSS' || days > 0;
+                                      const intAmt = p.interest_amount !== undefined ? Number(p.interest_amount) : (Number(s.interest_amount) || 0);
+
+                                      return (
+                                        <tr key={pIdx} className="hover:bg-slate-50">
+                                          <td className="py-2 px-3 font-black text-blue-900">
+                                            <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-800 inline-flex items-center justify-center text-[10px]">
+                                              #{pIdx + 1}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-3 text-right font-black table-number text-emerald-800">
+                                            ₹{Number(p.amount || 0).toLocaleString('en-IN')}
+                                          </td>
+                                          <td className="py-2 px-3 font-bold text-slate-900">
+                                            {p.date ? new Date(p.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '-'}
+                                          </td>
+                                          <td className="py-2 px-3 text-slate-600">
+                                            <span className="font-semibold text-slate-800">{p.mode || 'RTGS/NEFT'}</span>
+                                            {p.ref && <span className="text-[10px] text-slate-500 block">Ref: {p.ref}</span>}
+                                          </td>
+                                          <td className="py-2 px-3 text-center table-number font-bold">
+                                            <span className={isEarned ? 'text-emerald-700 font-extrabold' : isLoss ? 'text-rose-700 font-extrabold' : 'text-slate-500'}>
+                                              {days > 0 ? `+${days} days delay` : days < 0 ? `${Math.abs(days)} days early` : '0 days (Same Day)'}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-3 text-right table-number font-extrabold">
+                                            {intAmt > 0 ? (
+                                              <span className={isEarned ? 'text-emerald-700' : 'text-rose-700'}>
+                                                {isEarned ? `+₹${intAmt.toLocaleString('en-IN')}` : `-₹${intAmt.toLocaleString('en-IN')}`}
+                                              </span>
+                                            ) : '₹0'}
+                                          </td>
+                                          <td className="py-2 px-3 text-center">
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase inline-block ${
+                                              isEarned ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
+                                              isLoss ? 'bg-rose-100 text-rose-800 border border-rose-300' :
+                                              'bg-slate-100 text-slate-600'
+                                            }`}>
+                                              {isEarned ? 'EARNED / PROFIT' : isLoss ? 'DELAY LOSS' : 'NEUTRAL'}
+                                            </span>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+
+                              {totalPendingBal > 0 && (
+                                <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-300 text-xs text-amber-950 flex items-center justify-between">
+                                  <span>
+                                    ⏳ <strong>Pending ₹{totalPendingBal.toLocaleString('en-IN')}</strong>: 12% p.a. float interest will continue to accrue on this remaining balance until the final installment is paid.
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}
             </tbody>
             <tfoot>
               <tr className="bg-slate-100 border-t-2 border-slate-400 font-black text-slate-900">
-                <td colSpan="3" className="py-2 px-3 uppercase text-[11px] tracking-wider">TOTAL (this page)</td>
-                <td className="py-2 px-3 text-right table-number">{sales.reduce((a, s) => a + (Number(s.bags) || 0), 0).toLocaleString('en-IN')}</td>
-                <td className="py-2 px-3 text-right table-number">{sales.reduce((a, s) => a + (Number(s.qty_qtls) || 0), 0).toLocaleString('en-IN', { maximumFractionDigits: 1 })}</td>
-                <td /><td />
-                <td className="py-2 px-3 text-right table-number">₹{sales.reduce((a, s) => a + (Number(s.bill_amount) || 0), 0).toLocaleString('en-IN')}</td>
-                <td className="py-2 px-3 text-right table-number">₹{sales.reduce((a, s) => a + (Number(s.lorry_amount) || 0), 0).toLocaleString('en-IN')}</td>
-                <td className="py-2 px-3 text-right table-number text-purple-900">₹{sales.reduce((a, s) => a + (Number(s.brokerage_amount) || 0), 0).toLocaleString('en-IN')}</td>
-                <td />
-                <td className="py-2 px-3 text-right table-number">₹{sales.reduce((a, s) => a + (Number(s.received_amount) || 0), 0).toLocaleString('en-IN')}</td>
-                <td />
-                <td className="py-2 px-3 text-right table-number">₹{sales.reduce((a, s) => a + (Number(s.discount_amount) || 0), 0).toLocaleString('en-IN')}</td>
-                <td className="py-2 px-3 text-right table-number">₹{sales.reduce((a, s) => a + (Number(s.cutting_amount) || 0), 0).toLocaleString('en-IN')}</td>
-                <td /><td />
+                <td colSpan="3" className="py-2 px-3 uppercase text-[11px] tracking-wider border-r border-slate-300">TOTAL (this page)</td>
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">{sales.reduce((a, s) => a + (Number(s.bags) || 0), 0).toLocaleString('en-IN')}</td>
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">{sales.reduce((a, s) => a + (Number(s.qty_qtls) || 0), 0).toLocaleString('en-IN', { maximumFractionDigits: 1 })}</td>
+                <td className="border-r border-slate-300" /><td className="border-r border-slate-300" />
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">₹{sales.reduce((a, s) => a + (Number(s.bill_amount) || 0), 0).toLocaleString('en-IN')}</td>
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">
+                  <div>-₹{sales.reduce((a, s) => a + Math.max(0, (Number(s.lorry_amount || 0) - Number(s.lorry_advance || 0))), 0).toLocaleString('en-IN')}</div>
+                  {sales.some(s => Number(s.lorry_advance) > 0) && (
+                    <div className="text-[10px] text-amber-800 font-bold">
+                      Adv: ₹{sales.reduce((a, s) => a + (Number(s.lorry_advance) || 0), 0).toLocaleString('en-IN')}
+                    </div>
+                  )}
+                </td>
+                <td className="py-2 px-3 text-right table-number text-purple-900 border-r border-slate-300">₹{sales.reduce((a, s) => a + (Number(s.brokerage_amount) || 0), 0).toLocaleString('en-IN')}</td>
+                <td className="border-r border-slate-300" />
+                <td className={`py-2 px-3 text-right table-number font-black border-r border-slate-300 ${totalEstimatedProfit >= 0 ? 'text-emerald-800 bg-emerald-100/60' : 'text-rose-800 bg-rose-100/60'}`}>
+                  {totalEstimatedProfit >= 0 ? `+₹${totalEstimatedProfit.toLocaleString('en-IN')}` : `-₹${Math.abs(totalEstimatedProfit).toLocaleString('en-IN')}`}
+                </td>
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">₹{sales.reduce((a, s) => a + (Number(s.received_amount) || 0), 0).toLocaleString('en-IN')}</td>
+                <td className="border-r border-slate-300" />
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">₹{sales.reduce((a, s) => a + (Number(s.discount_amount) || 0), 0).toLocaleString('en-IN')}</td>
+                <td className="py-2 px-3 text-right table-number border-r border-slate-300">₹{sales.reduce((a, s) => a + (Number(s.cutting_amount) || 0), 0).toLocaleString('en-IN')}</td>
+                <td className="border-r border-slate-300" /><td />
               </tr>
             </tfoot>
           </table>
@@ -1133,6 +1609,77 @@ export default function SalesTab({ selectedTruckId }) {
             </div>
           </div>
 
+          {/* Sales Delivery Lorry Freight (LF) & Advance Section */}
+          <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-1.5 text-xs font-bold text-amber-950">
+                <Truck className="w-3.5 h-3.5 text-amber-700" />
+                <span>Sales Delivery Lorry Freight (LF) & Advance</span>
+              </div>
+              <span className="text-[11px] text-amber-800 font-semibold">
+                {activeTruck ? `Inward Truck LF: ₹${activeTruck.truck_lf || 0}/Q` : 'Custom Sale LF'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Sale LF Rate (₹/Qtl)
+                  <span className="text-[10px] text-slate-500 font-normal ml-1">
+                    {activeTruck ? `(Default ₹${activeTruck.truck_lf || 0})` : ''}
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder={activeTruck ? String(activeTruck.truck_lf || 0) : 'e.g. 290'}
+                  value={formData.lf_rate}
+                  onChange={(e) => updateFinancialFields({ lf_rate: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 font-bold text-slate-900 bg-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  LF Advance Paid by You (₹)
+                  <span className="text-[10px] text-amber-800 font-semibold ml-1">
+                    (Buyer pays you extra)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="e.g. 10000 or 0"
+                  value={formData.lorry_advance}
+                  onChange={(e) => updateFinancialFields({ lorry_advance: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 font-bold text-amber-950 bg-white"
+                />
+              </div>
+            </div>
+
+            {/* Live calculation breakdown strip */}
+            {calcQtls > 0 && calcLF > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-white rounded-lg border border-amber-200 text-xs font-semibold">
+                <div>
+                  <span className="text-slate-500">Total LF: </span>
+                  <span className="font-bold text-slate-900">₹{calcLorryAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                </div>
+                <div>
+                  <span className="text-amber-800">Your Advance: </span>
+                  <span className="font-bold text-amber-900">₹{calcLorryAdvance.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                </div>
+                <div>
+                  <span className="text-rose-700">Driver Balance (Buyer Pays): </span>
+                  <span className="font-extrabold text-rose-800">₹{calcLorryBalance.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                </div>
+                <div>
+                  <span className="text-emerald-800">Net Bill to Buyer: </span>
+                  <span className="font-extrabold text-emerald-900">₹{calcNetBillAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Payment Details & Settlement Section */}
           <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-3">
             <div className="flex items-center space-x-1.5 text-xs font-bold text-slate-800">
@@ -1173,27 +1720,225 @@ export default function SalesTab({ selectedTruckId }) {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">Received Amount (₹)</label>
-                <input
-                  type="number"
-                  step="any"
-                  placeholder="e.g. 183000"
-                  value={formData.received_amount}
-                  onChange={(e) => updateFinancialFields({ received_amount: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold text-emerald-800"
-                />
+            {/* Multi-Tranche Partial Payments Section */}
+            <div className="p-3 bg-white border border-emerald-200 rounded-xl space-y-3 shadow-2xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-100 pb-2">
+                <div>
+                  <div className="flex items-center space-x-1.5 text-xs font-bold text-emerald-950">
+                    <Receipt className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Buyer Installments & Tranche Payments (12% p.a. Float Interest)</span>
+                  </div>
+                  <span className="text-[11px] text-slate-500">
+                    Tranche-wise interest: interest stops on amount received and continues only on pending balance!
+                  </span>
+                </div>
+                {formData.payments && formData.payments.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={handleAddPaymentTranche}
+                    className="px-2.5 py-1 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow-2xs flex items-center space-x-1 cursor-pointer self-start sm:self-auto"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Add Installment</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleConvertToInstallments}
+                    className="px-2.5 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-2xs flex items-center space-x-1 cursor-pointer self-start sm:self-auto"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Split into Multiple Partial Payments</span>
+                  </button>
+                )}
               </div>
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">Payment Received Date</label>
-                <input
-                  type="date"
-                  value={formData.sale_received_date}
-                  onChange={(e) => setFormData({ ...formData, sale_received_date: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold text-slate-800"
-                />
-              </div>
+
+              {/* If payments array has items, display each installment */}
+              {formData.payments && formData.payments.length > 0 ? (
+                <div className="space-y-2.5">
+                  {formData.payments.map((p, idx) => {
+                    const trancheInfo = computeTrancheInterest(p);
+                    return (
+                      <div key={idx} className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-black text-slate-800 flex items-center space-x-1.5">
+                            <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center text-[10px] font-black">
+                              #{idx + 1}
+                            </span>
+                            <span>Installment {idx + 1}</span>
+                          </span>
+                          <div className="flex items-center space-x-2">
+                            {trancheInfo.type !== 'NONE' && (
+                              <span className={`text-[10px] px-2 py-0.5 rounded font-black border ${
+                                trancheInfo.type === 'EARNED'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                  : trancheInfo.type === 'LOSS'
+                                  ? 'bg-rose-50 text-rose-800 border-rose-300'
+                                  : 'bg-slate-100 text-slate-700 border-slate-300'
+                              }`}>
+                                {trancheInfo.type === 'EARNED'
+                                  ? `+₹${trancheInfo.interest.toLocaleString('en-IN')} Earned (${Math.abs(trancheInfo.days)}d early)`
+                                  : trancheInfo.type === 'LOSS'
+                                  ? `-₹${trancheInfo.interest.toLocaleString('en-IN')} Delay Loss (+${trancheInfo.days}d delay)`
+                                  : '0d (Neutral)'}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemovePaymentTranche(idx)}
+                              className="text-rose-600 hover:text-rose-800 p-1 hover:bg-rose-50 rounded cursor-pointer"
+                              title="Delete this installment"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                          <div>
+                            <label className="block text-[10px] text-slate-500 font-bold mb-0.5">Amount (₹) *</label>
+                            <input
+                              type="number"
+                              step="any"
+                              placeholder="e.g. 100000"
+                              value={p.amount}
+                              onChange={(e) => handleUpdatePaymentTranche(idx, 'amount', e.target.value)}
+                              className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded font-bold text-emerald-900 bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-500 font-bold mb-0.5">Received Date *</label>
+                            <input
+                              type="date"
+                              value={p.date}
+                              onChange={(e) => handleUpdatePaymentTranche(idx, 'date', e.target.value)}
+                              className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded font-bold text-slate-800 bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-500 font-bold mb-0.5">Payment Mode</label>
+                            <select
+                              value={p.mode || 'RTGS/NEFT'}
+                              onChange={(e) => handleUpdatePaymentTranche(idx, 'mode', e.target.value)}
+                              className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded font-semibold text-slate-800 bg-white"
+                            >
+                              <option value="RTGS/NEFT">RTGS / NEFT</option>
+                              <option value="Bank Transfer">Bank Transfer / IMPS</option>
+                              <option value="Cheque">Cheque</option>
+                              <option value="Cash">Cash</option>
+                              <option value="UPI">UPI</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-500 font-bold mb-0.5">UTR / Cheque Ref</label>
+                            <input
+                              type="text"
+                              placeholder="UTR or Cheque No"
+                              value={p.ref || ''}
+                              onChange={(e) => handleUpdatePaymentTranche(idx, 'ref', e.target.value)}
+                              className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded font-semibold text-slate-800 bg-white"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Installments Live Balance Strip */}
+                  <div className="p-2.5 bg-emerald-50/70 border border-emerald-200 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+                    <div>
+                      <span className="text-slate-600">Total Received: </span>
+                      <span className="text-emerald-800 font-black">
+                        ₹{Number(formData.received_amount || 0).toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-600">Pending Balance: </span>
+                      {(() => {
+                        const bal = Math.max(0, Math.round(calcNetBillAmount - (Number(formData.received_amount) || 0) - (Number(formData.discount_amount) || 0) - (Number(formData.cutting_amount) || 0)));
+                        return (
+                          <span className={bal > 0 ? 'text-amber-800 font-black' : 'text-emerald-700 font-black'}>
+                            {bal > 0 ? `₹${bal.toLocaleString('en-IN')} (Pending)` : 'Fully Paid ✓'}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                    {activeTruck && (activeTruck.purchase_payment_date || activeTruck.unloading_date || activeTruck.date) && (
+                      <div className="text-[11px] text-slate-500">
+                        Base: {new Date(activeTruck.purchase_payment_date || activeTruck.unloading_date || activeTruck.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Single Payment Form Inputs */
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Received Amount (₹)</label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="e.g. 183000"
+                        value={formData.received_amount}
+                        onChange={(e) => updateFinancialFields({ received_amount: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold text-emerald-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Payment Received Date</label>
+                      <input
+                        type="date"
+                        value={formData.sale_received_date}
+                        onChange={(e) => setFormData({ ...formData, sale_received_date: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Payment Mode</label>
+                      <select
+                        value={formData.payment_mode}
+                        onChange={(e) => setFormData({ ...formData, payment_mode: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold"
+                      >
+                        <option value="RTGS/NEFT">RTGS / NEFT</option>
+                        <option value="Bank Transfer">Bank Transfer / IMPS</option>
+                        <option value="Cheque">Cheque</option>
+                        <option value="Cash">Cash</option>
+                        <option value="UPI">UPI</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">UTR / Cheque / Ref No</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. UTR-92837482"
+                        value={formData.payment_ref}
+                        onChange={(e) => setFormData({ ...formData, payment_ref: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-semibold"
+                      />
+                    </div>
+                    <div>
+                      <span className="block text-[11px] text-slate-500 font-semibold mb-1">Need to record multiple parts?</span>
+                      <button
+                        type="button"
+                        onClick={handleConvertToInstallments}
+                        className="w-full py-2 px-3 border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 rounded-lg font-bold text-xs flex items-center justify-center space-x-1.5 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Record as 2+ Partial Payments</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Payment Status & Cutting Section */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
               <div>
                 <label className="block text-slate-700 font-bold mb-1">Payment Status</label>
                 <select
@@ -1202,36 +1947,10 @@ export default function SalesTab({ selectedTruckId }) {
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold"
                 >
                   <option value="PENDING PAYMENT">PENDING PAYMENT</option>
+                  <option value="PARTIAL PAYMENT">PARTIAL PAYMENT</option>
                   <option value="PAID">PAID</option>
                   <option value="CUTTING">CUTTING</option>
                 </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">Payment Mode</label>
-                <select
-                  value={formData.payment_mode}
-                  onChange={(e) => setFormData({ ...formData, payment_mode: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold"
-                >
-                  <option value="RTGS/NEFT">RTGS / NEFT</option>
-                  <option value="Bank Transfer">Bank Transfer / IMPS</option>
-                  <option value="Cheque">Cheque</option>
-                  <option value="Cash">Cash</option>
-                  <option value="UPI">UPI</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">UTR / Cheque / Ref No</label>
-                <input
-                  type="text"
-                  placeholder="e.g. UTR-92837482"
-                  value={formData.payment_ref}
-                  onChange={(e) => setFormData({ ...formData, payment_ref: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-semibold"
-                />
               </div>
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -1266,8 +1985,8 @@ export default function SalesTab({ selectedTruckId }) {
             }`}>
               <div>Floor Breakeven on this Rate: <span className="font-black">₹{previewWarnings.breakevenRate.toLocaleString('en-IN')}</span> / Qtl
                 {' '}{previewWarnings.belowBreakeven
-                  ? <span className="text-rose-700 font-black">⚠ Billing rate ₹{Number(formData.billing_rate || 0).toLocaleString('en-IN')} is BELOW breakeven — you lose ₹{previewWarnings.lossPerQtl.toLocaleString('en-IN', { maximumFractionDigits: 2 })}/Qtl!</span>
-                  : <span className="text-emerald-700 font-black">✓ Margin ₹{previewWarnings.marginPerQtl.toLocaleString('en-IN', { maximumFractionDigits: 2 })}/Qtl</span>}
+                  ? <span className="text-rose-700 font-black">⚠ Billing rate ₹{Number(formData.billing_rate || 0).toLocaleString('en-IN')} is BELOW breakeven — you lose ₹{previewWarnings.lossPerQtl.toLocaleString('en-IN', { maximumFractionDigits: 2 })}/Qtl! (Total Loss: -₹{Math.round(previewWarnings.lossPerQtl * calcQtls).toLocaleString('en-IN')})</span>
+                  : <span className="text-emerald-700 font-black">✓ Estimated Profit +₹{previewWarnings.marginPerQtl.toLocaleString('en-IN', { maximumFractionDigits: 2 })}/Qtl (Total Bill Profit: +₹{Math.round(previewWarnings.marginPerQtl * calcQtls).toLocaleString('en-IN')})</span>}
               </div>
               {previewWarnings.toIntWarnings.map((w, i) => (
                 <div key={i} className="text-[11px] text-amber-800">⚠ {w}</div>
